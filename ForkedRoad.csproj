@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>true</ImplicitUsings>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <CopyToGameMods>false</CopyToGameMods>
+    <PackageDir>$(MSBuildProjectDirectory)\package\$(MSBuildProjectName)\</PackageDir>
+    <Sts2Dir>D:\steam\steamapps\common\Slay the Spire 2</Sts2Dir>
+    <Sts2DataDir>$(Sts2Dir)\data_sts2_windows_x86_64</Sts2DataDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="GodotSharp">
+      <HintPath>$(Sts2DataDir)\GodotSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <Reference Include="sts2">
+      <HintPath>$(Sts2DataDir)\sts2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <Reference Include="0Harmony">
+      <HintPath>$(Sts2DataDir)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="StageMod" AfterTargets="Build">
+    <MakeDir Directories="$(PackageDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(PackageDir)$(MSBuildProjectName).dll" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFiles="$(PackageDir)$(MSBuildProjectName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\ForkedRoad.json" DestinationFiles="$(PackageDir)$(MSBuildProjectName).json" Condition="Exists('$(MSBuildProjectDirectory)\ForkedRoad.json')" />
+  </Target>
+
+  <Target Name="CopyMod" AfterTargets="Build" Condition="'$(CopyToGameMods)' == 'true'">
+    <Message Text="Copying mod to Slay the Spire 2 mods folder..." Importance="high" />
+    <MakeDir Directories="$(Sts2Dir)\mods\$(MSBuildProjectName)\" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(Sts2Dir)\mods\$(MSBuildProjectName)\$(MSBuildProjectName).dll" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\ForkedRoad.json" DestinationFiles="$(Sts2Dir)\mods\$(MSBuildProjectName)\$(MSBuildProjectName).json" Condition="Exists('$(MSBuildProjectDirectory)\ForkedRoad.json')" />
+  </Target>
+</Project>
