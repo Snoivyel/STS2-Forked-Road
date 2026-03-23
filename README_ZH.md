@@ -1,5 +1,7 @@
 # 杀戮尖塔2 分叉路线 (Forked Road)
 
+语言: [English](README.md) | **中文**
+
 [GitHub 仓库](https://github.com/Snoivyel/STS2-Forked-Road) | [MIT 协议](LICENSE)
 
 ![Version](https://img.shields.io/badge/version-1.0.0-2ea043)

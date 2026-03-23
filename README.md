@@ -1,5 +1,7 @@
 # Slay the Spire 2 Forked Road
 
+Language: **English** | [中文](README_ZH.md)
+
 [GitHub Repository](https://github.com/Snoivyel/STS2-Forked-Road) | [MIT License](LICENSE)
 
 ![Version](https://img.shields.io/badge/version-1.0.0-2ea043)
