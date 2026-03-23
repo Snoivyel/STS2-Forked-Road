@@ -7,7 +7,6 @@ Language: **English** | [中文](README_ZH.md)
 ![Version](https://img.shields.io/badge/version-1.0.0-2ea043)
 ![Game](https://img.shields.io/badge/Game-Slay%20the%20Spire%202-b54131)
 ![License](https://img.shields.io/badge/License-MIT-1f6feb)
-![Type](https://img.shields.io/badge/Type-Gameplay%20Mod-8250df)
 
 `Forked Road` is a multiplayer gameplay mod for Slay the Spire 2. It allows multiplayer map votes that target different combat routes to be resolved as separate branches, instead of forcing everyone onto the same route.
 

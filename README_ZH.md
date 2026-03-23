@@ -7,7 +7,6 @@
 ![Version](https://img.shields.io/badge/version-1.0.0-2ea043)
 ![Game](https://img.shields.io/badge/Game-Slay%20the%20Spire%202-b54131)
 ![License](https://img.shields.io/badge/License-MIT-1f6feb)
-![Type](https://img.shields.io/badge/Type-Gameplay%20Mod-8250df)
 
 `Forked Road` 是一款《杀戮尖塔2》的联机玩法模组，用来让多人地图投票在遇到不同战斗路线选择时，不再被强行压成同一条路线，而是按投票结果拆分成多个分支逐个结算。
 
