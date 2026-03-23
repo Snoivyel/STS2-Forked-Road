@@ -34,6 +34,7 @@
     <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(PackageDir)$(MSBuildProjectName).dll" />
     <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFiles="$(PackageDir)$(MSBuildProjectName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\ForkedRoad.json" DestinationFiles="$(PackageDir)$(MSBuildProjectName).json" Condition="Exists('$(MSBuildProjectDirectory)\ForkedRoad.json')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\LICENSE" DestinationFiles="$(PackageDir)LICENSE" Condition="Exists('$(MSBuildProjectDirectory)\LICENSE')" />
   </Target>
 
   <Target Name="CopyMod" AfterTargets="Build" Condition="'$(CopyToGameMods)' == 'true'">
@@ -41,5 +42,6 @@
     <MakeDir Directories="$(Sts2Dir)\mods\$(MSBuildProjectName)\" />
     <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(Sts2Dir)\mods\$(MSBuildProjectName)\$(MSBuildProjectName).dll" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\ForkedRoad.json" DestinationFiles="$(Sts2Dir)\mods\$(MSBuildProjectName)\$(MSBuildProjectName).json" Condition="Exists('$(MSBuildProjectDirectory)\ForkedRoad.json')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\LICENSE" DestinationFiles="$(Sts2Dir)\mods\$(MSBuildProjectName)\LICENSE" Condition="Exists('$(MSBuildProjectDirectory)\LICENSE')" />
   </Target>
 </Project>
