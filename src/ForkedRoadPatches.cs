@@ -25,6 +25,7 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Models.Singleton;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
+using MegaCrit.Sts2.Core.Multiplayer.Messages.Game.Checksums;
 using MegaCrit.Sts2.Core.Multiplayer.Messages.Game.Sync;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Nodes;
@@ -35,6 +36,7 @@ using MegaCrit.Sts2.Core.Nodes.Multiplayer;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
+using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
@@ -53,8 +55,10 @@ internal static class ForkedRoadPatches
     private static readonly MegaCrit.Sts2.Core.Logging.Logger TreasureLog = new("ForkedRoadTreasure", LogType.Generic);
     private static readonly MegaCrit.Sts2.Core.Logging.Logger EventLog = new("ForkedRoadEvent", LogType.Generic);
     private static readonly MegaCrit.Sts2.Core.Logging.Logger SaveLog = new("ForkedRoadSave", LogType.Generic);
+    private static readonly MegaCrit.Sts2.Core.Logging.Logger AdvanceLog = new("ForkedRoadAdvance", LogType.Generic);
 
     private static readonly Dictionary<ulong, int> SharedEventVoteSnapshot = new();
+    private static long _lastRewardSyncTickUtc;
 
     internal static readonly AccessTools.FieldRef<MapSelectionSynchronizer, RunState> MapSelectionRunStateRef =
         AccessTools.FieldRefAccess<MapSelectionSynchronizer, RunState>("_runState");
@@ -85,6 +89,9 @@ internal static class ForkedRoadPatches
 
     private static readonly MethodInfo RunManagerExitCurrentRoomMethod =
         AccessTools.Method(typeof(RunManager), "ExitCurrentRoom")!;
+
+    private static readonly FieldInfo RewardSynchronizerBufferedMessagesField =
+        AccessTools.Field(typeof(RewardSynchronizer), "_bufferedMessages")!;
 
     private static readonly FieldInfo MapSelectionPlayerVoteChangedField =
         AccessTools.Field(typeof(MapSelectionSynchronizer), "PlayerVoteChanged")!;
@@ -918,6 +925,54 @@ internal static class ForkedRoadPatches
         setter?.Invoke(instance, new[] { value });
     }
 
+    private static void TouchRewardSyncActivity(string source)
+    {
+        Interlocked.Exchange(ref _lastRewardSyncTickUtc, DateTime.UtcNow.Ticks);
+        AdvanceLog.Info($"Branch advance wait touched by {source}.");
+    }
+
+    private static bool HasPendingRewardSyncMessages()
+    {
+        object? bufferedMessages = RewardSynchronizerBufferedMessagesField.GetValue(RunManager.Instance.RewardSynchronizer);
+        return bufferedMessages is System.Collections.ICollection collection && collection.Count > 0;
+    }
+
+    internal static async Task WaitForLocalBranchAdvanceReadinessAsync(int branchSequence)
+    {
+        int stableIterations = 0;
+        for (int i = 0; i < 80; i++)
+        {
+            if (!ForkedRoadManager.IsSplitBatchInProgress || ForkedRoadManager.ActiveBranchSequence != branchSequence)
+            {
+                return;
+            }
+
+            bool rewardScreenBlocking = NOverlayStack.Instance?.Peek() is MegaCrit.Sts2.Core.Nodes.Screens.NRewardsScreen rewardsScreen && !rewardsScreen.IsComplete;
+            bool pendingRewardMessages = HasPendingRewardSyncMessages();
+            TimeSpan sinceLastRewardSync = TimeSpan.FromTicks(Math.Max(0, DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastRewardSyncTickUtc)));
+            TimeSpan rewardSyncSettleWindow = TimeSpan.FromTicks(TimeSpan.TicksPerMillisecond * 250L);
+            bool rewardSyncSettled = sinceLastRewardSync >= rewardSyncSettleWindow;
+
+            if (!rewardScreenBlocking && !pendingRewardMessages && rewardSyncSettled)
+            {
+                stableIterations++;
+                if (stableIterations >= 3)
+                {
+                    return;
+                }
+            }
+            else
+            {
+                stableIterations = 0;
+                AdvanceLog.Info($"Waiting for branch {branchSequence} advance readiness. rewardsScreenBlocking={rewardScreenBlocking} pendingRewardMessages={pendingRewardMessages} rewardSyncSettled={rewardSyncSettled}");
+            }
+
+            await Task.Delay(50);
+        }
+
+        AdvanceLog.Warn($"Timed out while waiting for branch {branchSequence} to finish local reward/ui cleanup; proceeding anyway.");
+    }
+
     private static async Task ExitTerminalRoomToMapAsync(string source)
     {
         RunManager runManager = RunManager.Instance;
@@ -1084,6 +1139,52 @@ internal static class ForkedRoadPatches
                 return true;
             }
             return !ForkedRoadManager.TryHandleVote(__instance, player, source, destination);
+        }
+    }
+
+    [HarmonyPatch(typeof(ChecksumTracker), "OnReceivedChecksumDataMessage")]
+    private static class ChecksumTracker_OnReceivedChecksumDataMessage_Patch
+    {
+        private static bool Prefix(ulong senderId)
+        {
+            if (!ForkedRoadManager.IsSplitBatchInProgress)
+            {
+                return true;
+            }
+
+            if (!ForkedRoadManager.IsLocalPlayerActiveInCurrentBranch)
+            {
+                Log.Info($"ForkedRoad ignored checksum data while local client is spectating split-branch combat. sender={senderId}");
+                return false;
+            }
+
+            if (!ForkedRoadManager.IsActivePlayerId(senderId))
+            {
+                Log.Info($"ForkedRoad ignored checksum data from spectator player {senderId} during split-branch combat.");
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    [HarmonyPatch(typeof(ChecksumTracker), "OnReceivedStateDivergenceMessage")]
+    private static class ChecksumTracker_OnReceivedStateDivergenceMessage_Patch
+    {
+        private static bool Prefix(ulong senderId)
+        {
+            if (!ForkedRoadManager.IsSplitBatchInProgress)
+            {
+                return true;
+            }
+
+            if (!ForkedRoadManager.IsLocalPlayerActiveInCurrentBranch || !ForkedRoadManager.IsActivePlayerId(senderId))
+            {
+                Log.Info($"ForkedRoad suppressed divergence handling for split-branch spectator state. localActive={ForkedRoadManager.IsLocalPlayerActiveInCurrentBranch} sender={senderId}");
+                return false;
+            }
+
+            return true;
         }
     }
 
@@ -1297,6 +1398,42 @@ internal static class ForkedRoadPatches
         {
             __result = SaveRunWithRetryAsync(__instance, preFinishedRoom);
             return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(RewardSynchronizer), "HandleRewardObtainedMessage")]
+    private static class RewardSynchronizer_HandleRewardObtainedMessage_Patch
+    {
+        private static void Prefix()
+        {
+            TouchRewardSyncActivity("reward_obtained");
+        }
+    }
+
+    [HarmonyPatch(typeof(RewardSynchronizer), "HandleGoldLostMessage")]
+    private static class RewardSynchronizer_HandleGoldLostMessage_Patch
+    {
+        private static void Prefix()
+        {
+            TouchRewardSyncActivity("gold_lost");
+        }
+    }
+
+    [HarmonyPatch(typeof(RewardSynchronizer), "HandleCardRemovedMessage")]
+    private static class RewardSynchronizer_HandleCardRemovedMessage_Patch
+    {
+        private static void Prefix()
+        {
+            TouchRewardSyncActivity("card_removed");
+        }
+    }
+
+    [HarmonyPatch(typeof(RewardSynchronizer), "HandlePaelsWingSacrifice")]
+    private static class RewardSynchronizer_HandlePaelsWingSacrifice_Patch
+    {
+        private static void Prefix()
+        {
+            TouchRewardSyncActivity("paels_wing");
         }
     }
 
@@ -2914,7 +3051,15 @@ internal static class ForkedRoadPatches
             RunManager.Instance.ActionQueueSynchronizer.SetCombatState(ActionSynchronizerCombatState.NotInCombat);
             NRunMusicController.Instance?.UpdateTrack();
             (CombatManagerCombatEndedField.GetValue(manager) as Action<CombatRoom>)?.Invoke(room);
-            ForkedRoadManager.NotifyLocalTerminalProceed();
+            // ForkedRoad: make this branch-merge guard explicit so it is easy to verify in source.
+            if (ForkedRoadManager.ShouldSuppressSpectatorReadyDuringMerge)
+            {
+                Log.Info("ForkedRoad spectator combat end skipped normal branch-ready notify because a merge cleanup is still pending.");
+            }
+            else
+            {
+                ForkedRoadManager.NotifyLocalTerminalProceed();
+            }
         }
     }
 

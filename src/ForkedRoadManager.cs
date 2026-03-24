@@ -9,6 +9,7 @@ using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes.Multiplayer;
 using MegaCrit.Sts2.Core.Nodes;
@@ -80,19 +81,42 @@ internal static class ForkedRoadManager
 
     private static int _pendingReadyBranchSequence = -1;
 
+    private static int _pendingAdvanceUiCheckBranchSequence = -1;
+
     public static bool IsSplitBatchInProgress => _splitBatchInProgress;
 
     public static int ActiveBranchSequence => _activeBranchSequence;
+
+    private static ulong? GetLocalNetId()
+    {
+        if (LocalContext.NetId.HasValue)
+        {
+            return LocalContext.NetId.Value;
+        }
+
+        if (_netService != null)
+        {
+            return _netService.NetId;
+        }
+
+        if (RunManager.Instance?.NetService != null)
+        {
+            return RunManager.Instance.NetService.NetId;
+        }
+
+        return null;
+    }
 
     public static bool IsLocalPlayerActiveInCurrentBranch
     {
         get
         {
-            if (!_splitBatchInProgress || _activeGroup == null || !LocalContext.NetId.HasValue)
+            ulong? localNetId = GetLocalNetId();
+            if (!_splitBatchInProgress || _activeGroup == null || !localNetId.HasValue)
             {
                 return true;
             }
-            return _activeGroup.PlayerIds.Contains(LocalContext.NetId.Value);
+            return _activeGroup.PlayerIds.Contains(localNetId.Value);
         }
     }
 
@@ -113,6 +137,13 @@ internal static class ForkedRoadManager
     public static bool IsSupportBranchActive => _splitBatchInProgress && _activeGroup != null && TryGetMergeTargetCoord(_activeGroup.Coord, out _);
 
     public static bool IsCurrentBranchEndingByMerge => _branchEndedByMerge;
+
+    public static bool HasPendingBranchMerge => PlayerMergeTargets.Count > 0 || _mergeCleanupBranchSequence >= 0;
+
+    // ForkedRoad: when a dead player is being merged into another branch, spectators of the
+    // old branch must not use their normal "combat ended -> ready for next branch" path.
+    // Otherwise the host can start the next branch before every client has finished the merge cleanup.
+    public static bool ShouldSuppressSpectatorReadyDuringMerge => _branchEndedByMerge || HasPendingBranchMerge;
 
     private static bool RequiresAllPlayersReadyForCurrentBranch()
     {
@@ -398,6 +429,15 @@ internal static class ForkedRoadManager
         return _activeGroup?.PlayerIds ?? Array.Empty<ulong>();
     }
 
+    public static bool IsActivePlayerId(ulong playerId)
+    {
+        if (!_splitBatchInProgress || _activeGroup == null)
+        {
+            return true;
+        }
+        return _activeGroup.PlayerIds.Contains(playerId);
+    }
+
     public static bool IsPlayerActive(Player player)
     {
         if (!_splitBatchInProgress || _activeGroup == null)
@@ -524,6 +564,62 @@ internal static class ForkedRoadManager
         }
     }
 
+    private static bool AreAllPlayersScreenReadyForBranchAdvance()
+    {
+        if (_runState == null)
+        {
+            return true;
+        }
+
+        try
+        {
+            foreach (Player player in _runState.Players)
+            {
+                NetScreenType screenType = RunManager.Instance.InputSynchronizer.GetScreenType(player.NetId);
+                if (screenType is not NetScreenType.None and not NetScreenType.Room and not NetScreenType.Map)
+                {
+                    Log.Info($"ForkedRoad delaying branch advance because player {player.NetId} is still on screen {screenType}.");
+                    return false;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"ForkedRoad could not verify peer screen readiness before advancing branch: {ex.Message}");
+        }
+
+        return true;
+    }
+
+    private static async Task RetryAdvanceBranchWhenScreensReadyAsync(int branchSequence)
+    {
+        try
+        {
+            for (int i = 0; i < 80; i++)
+            {
+                await Task.Delay(50);
+                if (_activeGroup == null || !_splitBatchInProgress || _activeBranchSequence != branchSequence)
+                {
+                    return;
+                }
+                if (!AreAllPlayersScreenReadyForBranchAdvance())
+                {
+                    continue;
+                }
+                TryAdvanceBranch();
+                return;
+            }
+            Log.Warn($"ForkedRoad timed out waiting for all peer screens to settle before advancing branch {branchSequence}.");
+        }
+        finally
+        {
+            if (_pendingAdvanceUiCheckBranchSequence == branchSequence)
+            {
+                _pendingAdvanceUiCheckBranchSequence = -1;
+            }
+        }
+    }
+
     public static Player? GetPerspectivePlayer(IEnumerable<Player> players)
     {
         List<Player> playerList = players.ToList();
@@ -533,9 +629,10 @@ internal static class ForkedRoadManager
         }
 
         Player? localPlayer = null;
-        if (LocalContext.NetId.HasValue)
+        ulong? localNetId = GetLocalNetId();
+        if (localNetId.HasValue)
         {
-            localPlayer = playerList.FirstOrDefault((Player p) => p.NetId == LocalContext.NetId.Value);
+            localPlayer = playerList.FirstOrDefault((Player p) => p.NetId == localNetId.Value);
         }
 
         if (!_splitBatchInProgress || _activeGroup == null)
@@ -553,12 +650,13 @@ internal static class ForkedRoadManager
 
     public static bool IsSpectatingBranch()
     {
-        if (!_splitBatchInProgress || _activeGroup == null || !LocalContext.NetId.HasValue)
+        ulong? localNetId = GetLocalNetId();
+        if (!_splitBatchInProgress || _activeGroup == null || !localNetId.HasValue)
         {
             return false;
         }
 
-        return !_activeGroup.PlayerIds.Contains(LocalContext.NetId.Value);
+        return !_activeGroup.PlayerIds.Contains(localNetId.Value);
     }
 
     public static void RefreshDisplayedPlayers()
@@ -582,12 +680,13 @@ internal static class ForkedRoadManager
             return true;
         }
 
-        if (!LocalContext.NetId.HasValue)
+        ulong? localNetId = GetLocalNetId();
+        if (!localNetId.HasValue)
         {
             return false;
         }
 
-        return PlayersFollowingMergedBranch.Contains(LocalContext.NetId.Value);
+        return PlayersFollowingMergedBranch.Contains(localNetId.Value);
     }
 
     public static bool ShouldReuseExistingFloorHistory(RunState runState)
@@ -668,6 +767,7 @@ internal static class ForkedRoadManager
                 await currentSaveTask;
             }
 
+            await ForkedRoadPatches.WaitForLocalBranchAdvanceReadinessAsync(branchSequence);
             await Task.Delay(50);
 
             if (!_splitBatchInProgress || _activeGroup == null || _netService == null || _runState == null || _activeBranchSequence != branchSequence)
@@ -1174,6 +1274,16 @@ internal static class ForkedRoadManager
             return;
         }
 
+        if (_netService.Type != NetGameType.Client && !AreAllPlayersScreenReadyForBranchAdvance())
+        {
+            if (_pendingAdvanceUiCheckBranchSequence != _activeBranchSequence)
+            {
+                _pendingAdvanceUiCheckBranchSequence = _activeBranchSequence;
+                TaskHelper.RunSafely(RetryAdvanceBranchWhenScreensReadyAsync(_activeBranchSequence));
+            }
+            return;
+        }
+
         if (!_branchEndedByMerge && !CompletedBranchCoords.Contains(_activeGroup.Coord))
         {
             CompletedBranchCoords.Add(_activeGroup.Coord);
@@ -1183,6 +1293,7 @@ internal static class ForkedRoadManager
         _activeGroup = null;
         _branchEndedByMerge = false;
         _mergeCleanupBranchSequence = -1;
+        _pendingAdvanceUiCheckBranchSequence = -1;
         if (PendingGroups.Count > 0)
         {
             SendNextBranchStartMessage();
@@ -1232,6 +1343,7 @@ internal static class ForkedRoadManager
         _branchEndedByMerge = false;
         _mergeCleanupBranchSequence = -1;
         _pendingReadyBranchSequence = -1;
+        _pendingAdvanceUiCheckBranchSequence = -1;
         RefreshDisplayedPlayers();
         if (NMapScreen.Instance != null)
         {
@@ -1258,6 +1370,7 @@ internal static class ForkedRoadManager
         _branchEndedByMerge = false;
         _mergeCleanupBranchSequence = -1;
         _pendingReadyBranchSequence = -1;
+        _pendingAdvanceUiCheckBranchSequence = -1;
         RefreshDisplayedPlayers();
     }
 }
