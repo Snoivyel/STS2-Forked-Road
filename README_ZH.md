@@ -4,7 +4,7 @@
 
 [GitHub 仓库](https://github.com/Snoivyel/STS2-Forked-Road) | [MIT 协议](LICENSE)
 
-![Version](https://img.shields.io/badge/version-1.0.0-2ea043)
+![Version](https://img.shields.io/badge/version-1.0.1-2ea043)
 ![Game](https://img.shields.io/badge/Game-Slay%20the%20Spire%202-b54131)
 ![License](https://img.shields.io/badge/License-MIT-1f6feb)
 

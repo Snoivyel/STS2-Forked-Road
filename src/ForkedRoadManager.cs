@@ -438,6 +438,25 @@ internal static class ForkedRoadManager
         return _activeGroup.PlayerIds.Contains(playerId);
     }
 
+    // ForkedRoad 2026-03-26:
+    // During split-branch combat, only the active branch's players should participate in
+    // checksum comparison. Spectator peers can legitimately diverge in local-only combat UI
+    // state, so their checksum traffic must be ignored.
+    public static bool ShouldIgnoreChecksumPeer(ulong senderId)
+    {
+        if (!_splitBatchInProgress)
+        {
+            return false;
+        }
+
+        if (!IsLocalPlayerActiveInCurrentBranch)
+        {
+            return true;
+        }
+
+        return !IsActivePlayerId(senderId);
+    }
+
     public static bool IsPlayerActive(Player player)
     {
         if (!_splitBatchInProgress || _activeGroup == null)

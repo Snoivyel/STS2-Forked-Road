@@ -655,32 +655,78 @@ internal static class ForkedRoadPatches
         RunManager.Instance.RunLocationTargetedBuffer.OnRunLocationChanged(restoredLocation);
     }
 
-    private static void EnsureTreasureSpectatorCollectionReady()
+    private static bool TryEnsureTreasureSpectatorCollectionReady()
     {
-        if (!ForkedRoadManager.IsSplitBatchInProgress || !ForkedRoadManager.IsSpectatingBranch())
+        try
         {
-            return;
-        }
+            if (!ForkedRoadManager.IsSplitBatchInProgress || !ForkedRoadManager.IsSpectatingBranch())
+            {
+                return true;
+            }
 
-        NTreasureRoom? treasureRoom = NRun.Instance?.TreasureRoom;
-        if (treasureRoom == null)
-        {
-            return;
-        }
+            NTreasureRoom? treasureRoom = NRun.Instance?.TreasureRoom;
+            if (treasureRoom == null)
+            {
+                return true;
+            }
 
-        var collection = (MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic.NTreasureRoomRelicCollection)NTreasureRoomRelicCollectionRef(treasureRoom);
-        if (!collection.Visible)
-        {
-            collection.InitializeRelics();
-            collection.Visible = true;
-            collection.SetSelectionEnabled(isEnabled: false);
-            NTreasureRoomIsRelicCollectionOpenRef(treasureRoom) = true;
-            ActiveScreenContext.Instance.Update();
-        }
+            var collection = (MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic.NTreasureRoomRelicCollection)NTreasureRoomRelicCollectionRef(treasureRoom);
+            if (!collection.Visible)
+            {
+                collection.InitializeRelics();
+                collection.Visible = true;
+                collection.SetSelectionEnabled(isEnabled: false);
+                NTreasureRoomIsRelicCollectionOpenRef(treasureRoom) = true;
+                // Spectators do not own a selectable relic slot. Updating ActiveScreenContext here
+                // can force NTreasureRoom(DefaultFocusedControl) to query the local player's slot
+                // index against a 1-item holder list and throw before spectator ready is sent.
+                TreasureLog.Info("Treasure spectator collection initialized without forcing ActiveScreenContext focus refresh.");
+            }
 
-        if (TreasureRelicPickingTcsRef(collection) == null)
+            if (TreasureRelicPickingTcsRef(collection) == null)
+            {
+                TreasureRelicPickingTcsRef(collection) = new TaskCompletionSource();
+            }
+
+            return true;
+        }
+        catch (Exception ex)
         {
-            TreasureRelicPickingTcsRef(collection) = new TaskCompletionSource();
+            TreasureLog.Warn($"Treasure spectator collection preparation failed but will not block branch advance: {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic.NTreasureRoomRelicCollection), "get_DefaultFocusedControl")]
+    private static class NTreasureRoomRelicCollection_DefaultFocusedControl_Patch
+    {
+        private static bool Prefix(MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic.NTreasureRoomRelicCollection __instance, ref Control? __result)
+        {
+            if (!ForkedRoadManager.IsSplitBatchInProgress || !ForkedRoadManager.IsSpectatingBranch())
+            {
+                return true;
+            }
+
+            List<MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic.NTreasureRoomRelicHolder> holders = TreasureHoldersInUseRef(__instance);
+            __result = holders.FirstOrDefault(static holder => holder.Visible);
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(NTreasureRoom), "get_DefaultFocusedControl")]
+    private static class NTreasureRoom_DefaultFocusedControl_Patch
+    {
+        private static bool Prefix(NTreasureRoom __instance, ref Control? __result)
+        {
+            if (!ForkedRoadManager.IsSplitBatchInProgress || !ForkedRoadManager.IsSpectatingBranch())
+            {
+                return true;
+            }
+
+            var collection = (MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic.NTreasureRoomRelicCollection)NTreasureRoomRelicCollectionRef(__instance);
+            List<MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic.NTreasureRoomRelicHolder> holders = TreasureHoldersInUseRef(collection);
+            __result = holders.FirstOrDefault(static holder => holder.Visible);
+            return false;
         }
     }
 
@@ -796,8 +842,8 @@ internal static class ForkedRoadPatches
             }
             else if (ForkedRoadManager.IsSplitBatchInProgress && ForkedRoadManager.IsSpectatingBranch())
             {
-                TreasureLog.Info("Treasure spectator flow completed; notifying branch advance readiness.");
-                ForkedRoadManager.NotifyLocalTerminalProceed();
+                TreasureLog.Info("Treasure spectator flow completed; exiting treasure room to map before notifying branch advance readiness.");
+                TaskHelper.RunSafely(ExitTerminalRoomToMapAsync("treasure_spectator"));
             }
         }
     }
@@ -1147,24 +1193,13 @@ internal static class ForkedRoadPatches
     {
         private static bool Prefix(ulong senderId)
         {
-            if (!ForkedRoadManager.IsSplitBatchInProgress)
+            if (!ForkedRoadManager.ShouldIgnoreChecksumPeer(senderId))
             {
                 return true;
             }
 
-            if (!ForkedRoadManager.IsLocalPlayerActiveInCurrentBranch)
-            {
-                Log.Info($"ForkedRoad ignored checksum data while local client is spectating split-branch combat. sender={senderId}");
-                return false;
-            }
-
-            if (!ForkedRoadManager.IsActivePlayerId(senderId))
-            {
-                Log.Info($"ForkedRoad ignored checksum data from spectator player {senderId} during split-branch combat.");
-                return false;
-            }
-
-            return true;
+            Log.Info($"ForkedRoad ignored checksum data from peer {senderId} because this checksum does not belong to the active split-branch combat.");
+            return false;
         }
     }
 
@@ -1173,18 +1208,13 @@ internal static class ForkedRoadPatches
     {
         private static bool Prefix(ulong senderId)
         {
-            if (!ForkedRoadManager.IsSplitBatchInProgress)
+            if (!ForkedRoadManager.ShouldIgnoreChecksumPeer(senderId))
             {
                 return true;
             }
 
-            if (!ForkedRoadManager.IsLocalPlayerActiveInCurrentBranch || !ForkedRoadManager.IsActivePlayerId(senderId))
-            {
-                Log.Info($"ForkedRoad suppressed divergence handling for split-branch spectator state. localActive={ForkedRoadManager.IsLocalPlayerActiveInCurrentBranch} sender={senderId}");
-                return false;
-            }
-
-            return true;
+            Log.Info($"ForkedRoad suppressed divergence handling for peer {senderId} because this checksum does not belong to the active split-branch combat.");
+            return false;
         }
     }
 
@@ -2593,7 +2623,7 @@ internal static class ForkedRoadPatches
     {
         private static bool Prefix(MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic.NTreasureRoomRelicCollection __instance, List<MegaCrit.Sts2.Core.Entities.TreasureRelicPicking.RelicPickingResult> results)
         {
-            EnsureTreasureSpectatorCollectionReady();
+            TryEnsureTreasureSpectatorCollectionReady();
 
             if (!ForkedRoadManager.IsSplitBatchInProgress)
             {
@@ -2621,7 +2651,7 @@ internal static class ForkedRoadPatches
                 return true;
             }
 
-            EnsureTreasureSpectatorCollectionReady();
+            TryEnsureTreasureSpectatorCollectionReady();
             __result = SafeAnimateTreasureAwardsAsync(__instance, results);
             return false;
         }
@@ -2903,7 +2933,18 @@ internal static class ForkedRoadPatches
     {
         private static bool Prefix()
         {
-            return !ForkedRoadManager.IsSpectatingBranch();
+            if (!ForkedRoadManager.IsSplitBatchInProgress)
+            {
+                return true;
+            }
+
+            if (ForkedRoadManager.IsSpectatingBranch())
+            {
+                return false;
+            }
+
+            TaskHelper.RunSafely(ExitTerminalRoomToMapAsync("treasure_active"));
+            return false;
         }
     }
 
@@ -2912,7 +2953,12 @@ internal static class ForkedRoadPatches
     {
         private static bool Prefix()
         {
-            return !ForkedRoadManager.IsSpectatingBranch();
+            if (ForkedRoadManager.IsSplitBatchInProgress)
+            {
+                return false;
+            }
+
+            return true;
         }
     }
 
