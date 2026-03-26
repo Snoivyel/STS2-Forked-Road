@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Godot;
 using MegaCrit.Sts2.Core.Context;
@@ -53,6 +54,8 @@ internal static class ForkedRoadManager
 
     private static bool _branchMergeResolvedHandlerRegistered;
 
+    private static bool _saveStateHandlerRegistered;
+
     private static BranchGroup? _activeGroup;
 
     private static bool _splitBatchInProgress;
@@ -82,6 +85,12 @@ internal static class ForkedRoadManager
     private static int _pendingReadyBranchSequence = -1;
 
     private static int _pendingAdvanceUiCheckBranchSequence = -1;
+
+    private static ForkedRoadSavedState? _stagedLoadedSaveState;
+
+    private static bool _shouldRestoreLocalRunLocationAfterLoad;
+
+    private static bool _shouldBroadcastLoadedSaveState;
 
     public static bool IsSplitBatchInProgress => _splitBatchInProgress;
 
@@ -131,8 +140,6 @@ internal static class ForkedRoadManager
             return _runState?.Players.Count ?? 1;
         }
     }
-
-    public static bool IsMainBranchActive => false;
 
     public static bool IsSupportBranchActive => _splitBatchInProgress && _activeGroup != null && TryGetMergeTargetCoord(_activeGroup.Coord, out _);
 
@@ -191,6 +198,8 @@ internal static class ForkedRoadManager
             _runState = runState;
             _trackedActIndex = runState.CurrentActIndex;
         }
+
+        TryApplyStagedLoadedSaveState(runState);
 
         if (_trackedActIndex != runState.CurrentActIndex && runState.CurrentMapCoord == null)
         {
@@ -259,6 +268,230 @@ internal static class ForkedRoadManager
             _netService.RegisterMessageHandler<ForkedRoadBranchMergeResolvedMessage>(HandleBranchMergeResolvedMessage);
             _branchMergeResolvedHandlerRegistered = true;
         }
+        if (!_saveStateHandlerRegistered)
+        {
+            _netService.RegisterMessageHandler<ForkedRoadSaveStateMessage>(HandleSaveStateMessage);
+            _saveStateHandlerRegistered = true;
+        }
+    }
+
+    public static void StageLoadedSaveState(ForkedRoadSavedState? saveState)
+    {
+        _stagedLoadedSaveState = saveState;
+        _shouldRestoreLocalRunLocationAfterLoad = false;
+        _shouldBroadcastLoadedSaveState = saveState != null;
+        if (saveState == null)
+        {
+            Log.Info("ForkedRoad cleared staged save-state restoration.");
+        }
+        else
+        {
+            Log.Info($"ForkedRoad staged save-state restoration for act {saveState.ActIndex} with {saveState.Players.Count} player branches.");
+        }
+    }
+
+    public static void OnRunLaunched()
+    {
+        if (_runState != null && _shouldRestoreLocalRunLocationAfterLoad)
+        {
+            if (_splitBatchInProgress && _activeGroup != null)
+            {
+                Log.Info($"ForkedRoad resumed active split batch at {_activeGroup.Coord}; preserving current room location until the active branch finishes.");
+            }
+            else
+            {
+                _shouldRestoreLocalRunLocationAfterLoad = false;
+                ForkedRoadPatches.RestoreLocalRunLocation(_runState);
+            }
+        }
+
+        if (_netService?.Type != NetGameType.Host || !_shouldBroadcastLoadedSaveState)
+        {
+            return;
+        }
+
+        _shouldBroadcastLoadedSaveState = false;
+        if (!TryCaptureSaveState(out ForkedRoadSavedState? saveState) || saveState == null)
+        {
+            return;
+        }
+
+        string stateJson = JsonSerializer.Serialize(saveState);
+        _netService.SendMessage(new ForkedRoadSaveStateMessage
+        {
+            actIndex = saveState.ActIndex,
+            stateJson = stateJson
+        });
+        Log.Info($"ForkedRoad broadcast restored save-state for act {saveState.ActIndex} with {saveState.Players.Count} player branches.");
+    }
+
+    public static bool TryCaptureSaveState(out ForkedRoadSavedState? saveState)
+    {
+        if (_runState == null || _runState.Players.Count <= 1)
+        {
+            saveState = null;
+            return false;
+        }
+
+        saveState = new ForkedRoadSavedState
+        {
+            ActIndex = _runState.CurrentActIndex,
+            SplitBatchInProgress = _splitBatchInProgress,
+            ActiveBranchSequence = _activeBranchSequence,
+            RemainingBranchesAfterCurrent = _remainingBranchesAfterCurrent,
+            ActiveGroup = _activeGroup == null
+                ? null
+                : new ForkedRoadSavedBranchGroup
+                {
+                    Coord = _activeGroup.Coord,
+                    PlayerIds = _activeGroup.PlayerIds.ToList()
+                },
+            PendingGroups = PendingGroups
+                .Select(group => new ForkedRoadSavedBranchGroup
+                {
+                    Coord = group.Coord,
+                    PlayerIds = group.PlayerIds.ToList()
+                })
+                .ToList(),
+            CompletedBranchCoords = CompletedBranchCoords.ToList(),
+            BranchPlayerCounts = BranchPlayerCounts
+                .Select(static pair => new ForkedRoadSavedBranchCount
+                {
+                    Coord = pair.Key,
+                    Count = pair.Value
+                })
+                .ToList(),
+            Players = _runState.Players
+                .Select(player => new ForkedRoadSavedPlayerState
+                {
+                    PlayerId = player.NetId,
+                    Coord = GetPlayerCoord(player.NetId, _runState),
+                    VisitedCoords = GetPlayerVisitedCoords(player.NetId, _runState).ToList()
+                })
+                .ToList()
+        };
+
+        return true;
+    }
+
+    private static void TryApplyStagedLoadedSaveState(RunState runState)
+    {
+        if (_stagedLoadedSaveState == null || _stagedLoadedSaveState.ActIndex != runState.CurrentActIndex)
+        {
+            return;
+        }
+
+        ApplySavedState(runState, _stagedLoadedSaveState, "local save");
+        _stagedLoadedSaveState = null;
+        _shouldRestoreLocalRunLocationAfterLoad = !_splitBatchInProgress || _activeGroup == null;
+    }
+
+    private static void ApplySavedState(RunState runState, ForkedRoadSavedState saveState, string source)
+    {
+        PlayerCoords.Clear();
+        PlayerVisitedCoords.Clear();
+        PendingGroups.Clear();
+        ReadyPlayers.Clear();
+        PlayerMergeTargets.Clear();
+        PlayersSkippingCurrentRoomRewards.Clear();
+        PlayersFollowingMergedBranch.Clear();
+        CompletedBranchCoords.Clear();
+        BranchPlayerCounts.Clear();
+        _branchEndedByMerge = false;
+        _mergeCleanupBranchSequence = -1;
+        _pendingReadyBranchSequence = -1;
+        _pendingAdvanceUiCheckBranchSequence = -1;
+
+        foreach (ForkedRoadSavedPlayerState playerState in saveState.Players)
+        {
+            PlayerCoords[playerState.PlayerId] = playerState.Coord;
+            PlayerVisitedCoords[playerState.PlayerId] = playerState.VisitedCoords.Count > 0
+                ? new List<MapCoord>(playerState.VisitedCoords)
+                : playerState.Coord.HasValue
+                    ? new List<MapCoord> { playerState.Coord.Value }
+                    : new List<MapCoord>();
+        }
+
+        foreach (Player player in runState.Players)
+        {
+            if (!PlayerCoords.ContainsKey(player.NetId))
+            {
+                PlayerCoords[player.NetId] = runState.CurrentMapCoord;
+            }
+
+            if (!PlayerVisitedCoords.ContainsKey(player.NetId))
+            {
+                PlayerVisitedCoords[player.NetId] = runState.CurrentMapCoord.HasValue
+                    ? new List<MapCoord> { runState.CurrentMapCoord.Value }
+                    : new List<MapCoord>();
+            }
+        }
+
+        _activeGroup = saveState.ActiveGroup == null
+            ? null
+            : new BranchGroup
+            {
+                Coord = saveState.ActiveGroup.Coord,
+                PlayerIds = saveState.ActiveGroup.PlayerIds.ToArray()
+            };
+
+        foreach (ForkedRoadSavedBranchGroup pendingGroup in saveState.PendingGroups)
+        {
+            PendingGroups.Enqueue(new BranchGroup
+            {
+                Coord = pendingGroup.Coord,
+                PlayerIds = pendingGroup.PlayerIds.ToArray()
+            });
+        }
+
+        foreach (MapCoord coord in saveState.CompletedBranchCoords)
+        {
+            CompletedBranchCoords.Add(coord);
+        }
+
+        foreach (ForkedRoadSavedBranchCount branchCount in saveState.BranchPlayerCounts)
+        {
+            BranchPlayerCounts[branchCount.Coord] = branchCount.Count;
+        }
+
+        _splitBatchInProgress = saveState.SplitBatchInProgress;
+        _activeBranchSequence = saveState.ActiveBranchSequence;
+        _remainingBranchesAfterCurrent = saveState.RemainingBranchesAfterCurrent;
+        RefreshDisplayedPlayers();
+
+        Log.Info($"ForkedRoad restored {source} branch state: splitBatch={_splitBatchInProgress} activeBranch={_activeGroup?.Coord.ToString() ?? "none"} pending={PendingGroups.Count} players={saveState.Players.Count}.");
+    }
+
+    private static void HandleSaveStateMessage(ForkedRoadSaveStateMessage message, ulong _senderId)
+    {
+        InitializeForRun(ForkedRoadPatches.GetRunManagerState(RunManager.Instance), RunManager.Instance.NetService);
+        if (_runState == null || message.actIndex != _runState.CurrentActIndex || string.IsNullOrWhiteSpace(message.stateJson))
+        {
+            return;
+        }
+
+        try
+        {
+            ForkedRoadSavedState? saveState = JsonSerializer.Deserialize<ForkedRoadSavedState>(message.stateJson);
+            if (saveState == null)
+            {
+                return;
+            }
+
+            ApplySavedState(_runState, saveState, "host sync");
+            if (LocalContext.NetId.HasValue && (!_splitBatchInProgress || _activeGroup == null))
+            {
+                ForkedRoadPatches.RestoreLocalRunLocation(_runState);
+            }
+            else if (_splitBatchInProgress && _activeGroup != null)
+            {
+                Log.Info($"ForkedRoad applied host save-state sync while branch {_activeGroup.Coord} is active; preserving current room location for spectators.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"ForkedRoad failed to apply save-state sync: {ex}");
+        }
     }
 
     public static void Reset()
@@ -293,10 +526,18 @@ internal static class ForkedRoadManager
             _netService.UnregisterMessageHandler<ForkedRoadBranchMergeResolvedMessage>(HandleBranchMergeResolvedMessage);
             _branchMergeResolvedHandlerRegistered = false;
         }
+        if (_netService != null && _saveStateHandlerRegistered)
+        {
+            _netService.UnregisterMessageHandler<ForkedRoadSaveStateMessage>(HandleSaveStateMessage);
+            _saveStateHandlerRegistered = false;
+        }
 
         _netService = null;
         _runState = null;
         _trackedActIndex = -1;
+        _stagedLoadedSaveState = null;
+        _shouldRestoreLocalRunLocationAfterLoad = false;
+        _shouldBroadcastLoadedSaveState = false;
         ClearRuntimeState();
     }
 
@@ -466,13 +707,13 @@ internal static class ForkedRoadManager
         return _activeGroup.PlayerIds.Contains(player.NetId);
     }
 
-    public static IEnumerable<string> GetActivePlayerNames(IRunState runState)
+    public static bool ShouldSkipRoomEndRewards(Player? player)
     {
-        return GetActivePlayers(runState).Select(static player => player.Character.Id.Entry);
-    }
+        if (player == null)
+        {
+            return true;
+        }
 
-    public static bool ShouldSkipRoomEndRewards(Player player)
-    {
         return PlayersSkippingCurrentRoomRewards.Remove(player.NetId);
     }
 
@@ -594,6 +835,11 @@ internal static class ForkedRoadManager
         {
             foreach (Player player in _runState.Players)
             {
+                if (ReadyPlayers.Contains(player.NetId))
+                {
+                    continue;
+                }
+
                 NetScreenType screenType = RunManager.Instance.InputSynchronizer.GetScreenType(player.NetId);
                 if (screenType is not NetScreenType.None and not NetScreenType.Room and not NetScreenType.Map)
                 {

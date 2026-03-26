@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Godot;
@@ -56,6 +57,7 @@ internal static class ForkedRoadPatches
     private static readonly MegaCrit.Sts2.Core.Logging.Logger EventLog = new("ForkedRoadEvent", LogType.Generic);
     private static readonly MegaCrit.Sts2.Core.Logging.Logger SaveLog = new("ForkedRoadSave", LogType.Generic);
     private static readonly MegaCrit.Sts2.Core.Logging.Logger AdvanceLog = new("ForkedRoadAdvance", LogType.Generic);
+    private const string ForkedRoadSaveStateJsonProperty = "forked_road";
 
     private static readonly Dictionary<ulong, int> SharedEventVoteSnapshot = new();
     private static long _lastRewardSyncTickUtc;
@@ -370,18 +372,14 @@ internal static class ForkedRoadPatches
         bool forceSynchronous = RunSaveManagerForceSynchronousRef(manager);
         const int maxAttempts = 8;
 
-        using MemoryStream stream = new();
+        string saveJson = SerializeRunWithForkedRoadState(serializableRun);
         if (!forceSynchronous)
         {
-            await JsonSerializer.SerializeAsync(stream, serializableRun, JsonSerializationUtility.GetTypeInfo<SerializableRun>(), default);
-            stream.Seek(0L, SeekOrigin.Begin);
-            byte[] bytes = stream.ToArray();
-
             for (int attempt = 1; ; attempt++)
             {
                 try
                 {
-                    await saveStore.WriteFileAsync(savePath, bytes);
+                    await saveStore.WriteFileAsync(savePath, saveJson);
                     (RunSaveManagerSavedField.GetValue(manager) as Action)?.Invoke();
                     return;
                 }
@@ -392,15 +390,11 @@ internal static class ForkedRoadPatches
                 }
             }
         }
-
-        JsonSerializer.Serialize(stream, serializableRun, JsonSerializationUtility.GetTypeInfo<SerializableRun>());
-        stream.Seek(0L, SeekOrigin.Begin);
-        byte[] syncBytes = stream.ToArray();
         for (int attempt = 1; ; attempt++)
         {
             try
             {
-                saveStore.WriteFile(savePath, syncBytes);
+                saveStore.WriteFile(savePath, saveJson);
                 (RunSaveManagerSavedField.GetValue(manager) as Action)?.Invoke();
                 return;
             }
@@ -410,6 +404,58 @@ internal static class ForkedRoadPatches
                 Thread.Sleep(150 * attempt);
             }
         }
+    }
+
+    private static string SerializeRunWithForkedRoadState(SerializableRun serializableRun)
+    {
+        string baseJson = JsonSerializer.Serialize(serializableRun, JsonSerializationUtility.GetTypeInfo<SerializableRun>());
+        JsonObject root = (JsonNode.Parse(baseJson) as JsonObject) ?? new JsonObject();
+
+        if (ForkedRoadManager.TryCaptureSaveState(out ForkedRoadSavedState? saveState) && saveState != null)
+        {
+            root[ForkedRoadSaveStateJsonProperty] = JsonSerializer.SerializeToNode(saveState);
+            SaveLog.Info($"ForkedRoad embedded split-branch save-state into multiplayer run save. players={saveState.Players.Count} splitBatch={saveState.SplitBatchInProgress}");
+        }
+        else
+        {
+            root.Remove(ForkedRoadSaveStateJsonProperty);
+        }
+
+        return root.ToJsonString();
+    }
+
+    private static ForkedRoadSavedState? TryReadForkedRoadSaveState(RunSaveManager manager, bool multiplayer)
+    {
+        IProfileIdProvider profileIdProvider = RunSaveManagerProfileIdProviderRef(manager);
+        string savePath = RunSaveManager.GetRunSavePath(
+            profileIdProvider.CurrentProfileId,
+            multiplayer ? RunSaveManager.multiplayerRunSaveFileName : RunSaveManager.runSaveFileName);
+        ISaveStore saveStore = RunSaveManagerSaveStoreRef(manager);
+
+        string? json = saveStore.FileExists(savePath)
+            ? saveStore.ReadFile(savePath)
+            : saveStore.FileExists(savePath + ".backup")
+                ? saveStore.ReadFile(savePath + ".backup")
+                : null;
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        JsonNode? root = JsonNode.Parse(json);
+        JsonNode? node = root?[ForkedRoadSaveStateJsonProperty];
+        if (node == null)
+        {
+            return null;
+        }
+
+        ForkedRoadSavedState? saveState = node.Deserialize<ForkedRoadSavedState>();
+        if (saveState != null)
+        {
+            SaveLog.Info($"ForkedRoad loaded split-branch save-state from multiplayer run save. players={saveState.Players.Count} splitBatch={saveState.SplitBatchInProgress}");
+        }
+
+        return saveState;
     }
 
     private static void CaptureSharedEventVotes(MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer synchronizer)
@@ -993,13 +1039,12 @@ internal static class ForkedRoadPatches
                 return;
             }
 
-            bool rewardScreenBlocking = NOverlayStack.Instance?.Peek() is MegaCrit.Sts2.Core.Nodes.Screens.NRewardsScreen rewardsScreen && !rewardsScreen.IsComplete;
             bool pendingRewardMessages = HasPendingRewardSyncMessages();
             TimeSpan sinceLastRewardSync = TimeSpan.FromTicks(Math.Max(0, DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastRewardSyncTickUtc)));
             TimeSpan rewardSyncSettleWindow = TimeSpan.FromTicks(TimeSpan.TicksPerMillisecond * 250L);
             bool rewardSyncSettled = sinceLastRewardSync >= rewardSyncSettleWindow;
 
-            if (!rewardScreenBlocking && !pendingRewardMessages && rewardSyncSettled)
+            if (!pendingRewardMessages && rewardSyncSettled)
             {
                 stableIterations++;
                 if (stableIterations >= 3)
@@ -1010,7 +1055,7 @@ internal static class ForkedRoadPatches
             else
             {
                 stableIterations = 0;
-                AdvanceLog.Info($"Waiting for branch {branchSequence} advance readiness. rewardsScreenBlocking={rewardScreenBlocking} pendingRewardMessages={pendingRewardMessages} rewardSyncSettled={rewardSyncSettled}");
+                AdvanceLog.Info($"Waiting for branch {branchSequence} advance readiness. pendingRewardMessages={pendingRewardMessages} rewardSyncSettled={rewardSyncSettled}");
             }
 
             await Task.Delay(50);
@@ -1431,6 +1476,30 @@ internal static class ForkedRoadPatches
         }
     }
 
+    [HarmonyPatch(typeof(RunSaveManager), nameof(RunSaveManager.LoadAndCanonicalizeMultiplayerRunSave))]
+    private static class RunSaveManager_LoadAndCanonicalizeMultiplayerRunSave_Patch
+    {
+        private static void Postfix(RunSaveManager __instance, ref ReadSaveResult<SerializableRun> __result)
+        {
+            if (__result == null || !__result.Success)
+            {
+                ForkedRoadManager.StageLoadedSaveState(null);
+                return;
+            }
+
+            ForkedRoadManager.StageLoadedSaveState(TryReadForkedRoadSaveState(__instance, multiplayer: true));
+        }
+    }
+
+    [HarmonyPatch(typeof(RunManager), nameof(RunManager.Launch))]
+    private static class RunManager_Launch_Patch
+    {
+        private static void Postfix()
+        {
+            ForkedRoadManager.OnRunLaunched();
+        }
+    }
+
     [HarmonyPatch(typeof(RewardSynchronizer), "HandleRewardObtainedMessage")]
     private static class RewardSynchronizer_HandleRewardObtainedMessage_Patch
     {
@@ -1474,6 +1543,27 @@ internal static class ForkedRoadPatches
         {
             if (!ForkedRoadManager.IsSplitBatchInProgress)
             {
+                return true;
+            }
+
+            if (room is CombatRoom preFinishedCombatRoom && preFinishedCombatRoom.IsPreFinished && !ForkedRoadManager.IsLocalPlayerActiveInCurrentBranch)
+            {
+                Log.Info("ForkedRoad suppressing room-end rewards for a non-active split-branch spectator while restoring a pre-finished combat room.");
+                ForkedRoadManager.NotifyLocalTerminalProceed();
+                __result = Task.CompletedTask;
+                return false;
+            }
+
+            if (player == null)
+            {
+                if (room is CombatRoom combatRoom && combatRoom.IsPreFinished && ForkedRoadManager.IsSpectatingBranch())
+                {
+                    Log.Info("ForkedRoad skipping room-end rewards for split-branch spectator while reloading a pre-finished combat room.");
+                    ForkedRoadManager.NotifyLocalTerminalProceed();
+                    __result = Task.CompletedTask;
+                    return false;
+                }
+
                 return true;
             }
 
@@ -2293,6 +2383,41 @@ internal static class ForkedRoadPatches
             EventLog.Info($"Spectator entering event combat for {__instance.Id}; resumeAfterCombat={shouldResumeAfterCombat} layout={__instance.LayoutType}.");
             TaskHelper.RunSafely(RunManager.Instance.EnterRoomWithoutExitingCurrentRoom(combatRoom, __instance.LayoutType != EventLayoutType.Combat));
             return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(EventModel), nameof(EventModel.GenerateInternalCombatState))]
+    private static class EventModel_GenerateInternalCombatState_Patch
+    {
+        private static void Postfix(EventModel __instance, IRunState runState)
+        {
+            if (!ForkedRoadManager.IsSplitBatchInProgress || !__instance.IsShared || __instance.LayoutType != EventLayoutType.Combat)
+            {
+                return;
+            }
+
+            CombatState? combatState = EventModelCombatStateForCombatLayoutRef(__instance);
+            if (combatState == null)
+            {
+                return;
+            }
+
+            List<Creature> inactiveCreatures = combatState.PlayerCreatures
+                .Where(static creature => creature.Player != null)
+                .Where(creature => !ForkedRoadManager.IsPlayerActive(creature.Player!))
+                .ToList();
+
+            if (inactiveCreatures.Count == 0)
+            {
+                return;
+            }
+
+            foreach (Creature creature in inactiveCreatures)
+            {
+                combatState.RemoveCreature(creature);
+            }
+
+            EventLog.Info($"Filtered combat-layout event players for {__instance.Id}; activePlayers={string.Join(",", ForkedRoadManager.GetActivePlayers(runState).Select(static p => p.NetId))} removedSpectators={string.Join(",", inactiveCreatures.Select(static creature => creature.Player?.NetId ?? 0UL))}");
         }
     }
 

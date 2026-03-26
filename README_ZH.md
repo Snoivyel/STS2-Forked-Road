@@ -4,7 +4,7 @@
 
 [GitHub 仓库](https://github.com/Snoivyel/STS2-Forked-Road) | [MIT 协议](LICENSE)
 
-![Version](https://img.shields.io/badge/version-1.0.1-2ea043)
+![Version](https://img.shields.io/badge/version-1.0.2-2ea043)
 ![Game](https://img.shields.io/badge/Game-Slay%20the%20Spire%202-b54131)
 ![License](https://img.shields.io/badge/License-MIT-1f6feb)
 
@@ -41,8 +41,3 @@
 - 进入分支后，当前分支玩家会正常进入房间；其余玩家会被限制旁观流程中，直到轮到自己的分支，或者本轮分支全部结算完成。
 - 某些分支在结束时会触发重新汇合逻辑，模组会同步玩家位置、房间状态以及后续地图投票。
 - 当前项目重点覆盖战斗路线分叉场景，属于直接影响联机玩法的内容，建议和固定联机队伍一起使用并保持版本一致。
-
-## ⚠️ 已知问题
-
-1. 暂时不支持 `SL`。执行 `SL` 后，所有玩家的分支状态会被重新汇总到当前场景对应的同一路线中。
-2. 在合作事件中，`物理机互肘` 和 `历史书任务` ，如果在分路后进入战斗，当前版本可能出现无法正常结束回合的问题；目前只能通过 `SL` 勉强继续流程。

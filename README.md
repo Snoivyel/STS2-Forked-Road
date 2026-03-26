@@ -4,7 +4,7 @@ Language: **English** | [中文](README_ZH.md)
 
 [GitHub Repository](https://github.com/Snoivyel/STS2-Forked-Road) | [MIT License](LICENSE)
 
-![Version](https://img.shields.io/badge/version-1.0.1-2ea043)
+![Version](https://img.shields.io/badge/version-1.0.2-2ea043)
 ![Game](https://img.shields.io/badge/Game-Slay%20the%20Spire%202-b54131)
 ![License](https://img.shields.io/badge/License-MIT-1f6feb)
 
@@ -41,8 +41,3 @@ The mod records the route each player is currently on, and handles room logic, c
 - After entering a branch, players in the current branch enter the room normally, while the remaining players are restricted to spectator flow until it is their turn or until all branches in the current split batch have finished resolving.
 - Some branches trigger regrouping logic at the end, and the mod synchronizes player positions, room state, and the follow-up map voting flow.
 - The current project mainly focuses on split combat-route scenarios. Since it directly affects multiplayer gameplay, it is recommended for use with a fixed multiplayer group that stays on the same version.
-
-## ⚠️ Known Issues
-
-1. `SL` is not supported for now. After using `SL`, all player branch states will be merged back into the route corresponding to the current scene.
-2. In co-op events such as `物理机互肘` and `历史书任务`, if combat starts after the route has split, the current version may fail to end turns properly. For now, the only rough workaround is using `SL`.
