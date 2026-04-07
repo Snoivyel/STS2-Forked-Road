@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>true</ImplicitUsings>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>ForkedRoad</AssemblyName>
+    <RootNamespace>ForkedRoad</RootNamespace>
+    <CopyToGameMods>false</CopyToGameMods>
+    <BaseIntermediateOutputPath>$(MSBuildProjectDirectory)\obj_legacy\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildProjectDirectory)\bin_legacy\</BaseOutputPath>
+    <PackageDir>$(MSBuildProjectDirectory)\package_legacy\ForkedRoad\</PackageDir>
+    <LegacySts2Dir>D:\sts2\study</LegacySts2Dir>
+    <LegacySts2DataDir>$(LegacySts2Dir)\data_sts2_windows_x86_64</LegacySts2DataDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="GodotSharp">
+      <HintPath>$(LegacySts2DataDir)\GodotSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <Reference Include="sts2">
+      <HintPath>$(LegacySts2DataDir)\sts2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <Reference Include="0Harmony">
+      <HintPath>$(LegacySts2DataDir)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="StageLegacyMod" AfterTargets="Build">
+    <MakeDir Directories="$(PackageDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(PackageDir)ForkedRoad.dll" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFiles="$(PackageDir)ForkedRoad.pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\ForkedRoad.json" DestinationFiles="$(PackageDir)ForkedRoad.json" Condition="Exists('$(MSBuildProjectDirectory)\ForkedRoad.json')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\LICENSE" DestinationFiles="$(PackageDir)LICENSE" Condition="Exists('$(MSBuildProjectDirectory)\LICENSE')" />
+  </Target>
+
+  <Target Name="CopyLegacyMod" AfterTargets="Build" Condition="'$(CopyToGameMods)' == 'true'">
+    <Message Text="Copying legacy mod to old Slay the Spire 2 mods folder..." Importance="high" />
+    <MakeDir Directories="$(LegacySts2Dir)\mods\ForkedRoad\" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(LegacySts2Dir)\mods\ForkedRoad\ForkedRoad.dll" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFiles="$(LegacySts2Dir)\mods\ForkedRoad\ForkedRoad.pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\ForkedRoad.json" DestinationFiles="$(LegacySts2Dir)\mods\ForkedRoad\ForkedRoad.json" Condition="Exists('$(MSBuildProjectDirectory)\ForkedRoad.json')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\LICENSE" DestinationFiles="$(LegacySts2Dir)\mods\ForkedRoad\LICENSE" Condition="Exists('$(MSBuildProjectDirectory)\LICENSE')" />
+  </Target>
+</Project>

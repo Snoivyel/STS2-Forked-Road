@@ -5,12 +5,16 @@
     <LangVersion>12.0</LangVersion>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <CopyToGameMods>false</CopyToGameMods>
     <PackageDir>$(MSBuildProjectDirectory)\package\$(MSBuildProjectName)\</PackageDir>
     <Sts2Dir>D:\steam\steamapps\common\Slay the Spire 2</Sts2Dir>
     <Sts2DataDir>$(Sts2Dir)\data_sts2_windows_x86_64</Sts2DataDir>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="beta\**\*.cs" />
+  </ItemGroup>
 
   <ItemGroup>
     <Reference Include="GodotSharp">
