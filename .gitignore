@@ -8,3 +8,13 @@
 /package_legacy/
 /src.zip
 src/*.uid
+/NuGet.Config
+/icon.svg
+/RELEASE_NOTES.txt
+/icon.svg.import
+/project.godot
+/ROUTE_SPLIT_REFACTOR.md
+/ForkedRoad.sln
+/ForkedRoad.csproj
+/ForkedRoad.Legacy.csproj
+/export_presets.cfg
