@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Map;
@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Multiplayer.Serialization;
 using MegaCrit.Sts2.Core.Multiplayer.Transport;
 using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Runs;
 
 namespace ForkedRoad;
 
@@ -302,6 +303,83 @@ public struct ForkedRoadBranchCombatSnapshotMessage : INetMessage
         encounterId = reader.ReadModelIdAssumingType<EncounterModel>();
         alliedCreatureCount = reader.ReadInt();
         snapshot = reader.Read<NetFullCombatState>();
+    }
+}
+
+public struct ForkedRoadBranchSpectatorStateMessage : INetMessage
+{
+    public int actIndex;
+
+    public int batchId;
+
+    public int branchId;
+
+    public SpectatorViewKind kind;
+
+    public string? title;
+
+    public string? description;
+
+    public List<string>? options;
+
+    public List<string>? optionDescriptions;
+
+    public bool isInteractionBlocked;
+
+    public int revision;
+
+    public bool ShouldBroadcast => true;
+
+    public NetTransferMode Mode => NetTransferMode.Reliable;
+
+    public LogLevel LogLevel => LogLevel.VeryDebug;
+
+    public void Serialize(PacketWriter writer)
+    {
+        writer.WriteInt(actIndex);
+        writer.WriteInt(batchId);
+        writer.WriteInt(branchId);
+        writer.WriteEnum(kind);
+        writer.WriteString(title ?? string.Empty);
+        writer.WriteString(description ?? string.Empty);
+        List<string> optionList = options ?? new List<string>();
+        writer.WriteInt(optionList.Count);
+        foreach (string option in optionList)
+        {
+            writer.WriteString(option);
+        }
+        List<string> optionDescriptionList = optionDescriptions ?? new List<string>();
+        writer.WriteInt(optionDescriptionList.Count);
+        foreach (string optionDescription in optionDescriptionList)
+        {
+            writer.WriteString(optionDescription);
+        }
+        writer.WriteBool(isInteractionBlocked);
+        writer.WriteInt(revision);
+    }
+
+    public void Deserialize(PacketReader reader)
+    {
+        actIndex = reader.ReadInt();
+        batchId = reader.ReadInt();
+        branchId = reader.ReadInt();
+        kind = reader.ReadEnum<SpectatorViewKind>();
+        title = reader.ReadString();
+        description = reader.ReadString();
+        int optionCount = reader.ReadInt();
+        options = new List<string>(optionCount);
+        for (int i = 0; i < optionCount; i++)
+        {
+            options.Add(reader.ReadString());
+        }
+        int optionDescriptionCount = reader.ReadInt();
+        optionDescriptions = new List<string>(optionDescriptionCount);
+        for (int i = 0; i < optionDescriptionCount; i++)
+        {
+            optionDescriptions.Add(reader.ReadString());
+        }
+        isInteractionBlocked = reader.ReadBool();
+        revision = reader.ReadInt();
     }
 }
 
@@ -750,3 +828,33 @@ internal struct ForkedRoadSaveRestoreStateMessage : INetMessage
         snapshot = reader.Read<ForkedRoadSavedRunSnapshot>();
     }
 }
+
+internal struct ForkedRoadSharedEventOptionChosenMessage : INetMessage
+{
+    public uint optionIndex;
+
+    public uint pageIndex;
+
+    public RunLocation location;
+
+    public bool ShouldBroadcast => true;
+
+    public NetTransferMode Mode => NetTransferMode.Reliable;
+
+    public LogLevel LogLevel => LogLevel.Info;
+
+    public void Serialize(PacketWriter writer)
+    {
+        writer.WriteUInt(optionIndex, 4);
+        writer.WriteUInt(pageIndex, 4);
+        writer.Write(location);
+    }
+
+    public void Deserialize(PacketReader reader)
+    {
+        optionIndex = reader.ReadUInt(4);
+        pageIndex = reader.ReadUInt(4);
+        location = reader.Read<RunLocation>();
+    }
+}
+

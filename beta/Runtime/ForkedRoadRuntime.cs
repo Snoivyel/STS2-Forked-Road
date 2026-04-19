@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Map;
@@ -31,6 +31,31 @@ internal enum RouteSplitBranchPhase
     Completed
 }
 
+public enum SpectatorViewKind
+{
+    None,
+    Combat,
+    Event,
+    Treasure
+}
+
+internal sealed class BranchSpectatorViewState
+{
+    public SpectatorViewKind Kind { get; set; }
+
+    public string Title { get; set; } = string.Empty;
+
+    public string Description { get; set; } = string.Empty;
+
+    public List<string> Options { get; set; } = new();
+
+    public List<string> OptionDescriptions { get; set; } = new();
+
+    public bool IsInteractionBlocked { get; set; } = true;
+
+    public int Revision { get; set; }
+}
+
 internal sealed class PlayerBranchRuntime
 {
     public required ulong PlayerId { get; init; }
@@ -51,6 +76,8 @@ internal sealed class PlayerBranchRuntime
 internal sealed class SpectatorRuntimeState
 {
     public List<int> AvailableBranchIds { get; set; } = new();
+
+    public List<ulong?> AvailablePlayerIds { get; set; } = new();
 
     public int CurrentViewedBranchIndex { get; set; }
 
@@ -73,6 +100,24 @@ internal sealed class SpectatorRuntimeState
             }
 
             return AvailableBranchIds[CurrentViewedBranchIndex];
+        }
+    }
+
+    public ulong? CurrentPlayerId
+    {
+        get
+        {
+            if (AvailablePlayerIds.Count == 0)
+            {
+                return null;
+            }
+
+            if (CurrentViewedBranchIndex < 0 || CurrentViewedBranchIndex >= AvailablePlayerIds.Count)
+            {
+                return null;
+            }
+
+            return AvailablePlayerIds[CurrentViewedBranchIndex];
         }
     }
 }
@@ -106,6 +151,8 @@ internal sealed class BranchGroupRuntime
     public ModelId? EncounterId { get; set; }
 
     public NetFullCombatState? LatestCombatState { get; set; }
+
+    public BranchSpectatorViewState? LatestViewState { get; set; }
 
     public int AlliedCreatureCount { get; set; }
 
@@ -151,3 +198,4 @@ internal sealed class RouteSplitRuntime
 
     public Dictionary<ulong, SpectatorRuntimeState> Spectators { get; } = new();
 }
+

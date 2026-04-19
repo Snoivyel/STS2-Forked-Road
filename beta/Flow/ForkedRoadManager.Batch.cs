@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using MegaCrit.Sts2.Core.Context;
@@ -10,6 +10,7 @@ using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.TestSupport;
 
 namespace ForkedRoad;
@@ -52,7 +53,13 @@ internal static partial class ForkedRoadManager
             .ThenBy(static group => group.Key.col)
             .ToList();
 
-        bool shouldRunCustomBatch = groupedVotes.Count > 1 || Runtime.RequiresAuthoritativeRoomPlans || HasEliminatedPlayers();
+        bool hasMultipleSourceCoords = Runtime.Players.Values
+            .Where(player => player.SelectionCoord.HasValue)
+            .Select(player => player.SelectionCoord!.Value)
+            .Distinct()
+            .Take(2)
+            .Count() > 1;
+        bool shouldRunCustomBatch = groupedVotes.Count > 1 || hasMultipleSourceCoords || Runtime.RequiresAuthoritativeRoomPlans || HasEliminatedPlayers();
         if (!shouldRunCustomBatch)
         {
             return false;
@@ -315,6 +322,11 @@ internal static partial class ForkedRoadManager
             localBranch.EncounterId = combatRoom.Encounter.Id;
         }
 
+        if (_netService.Type == NetGameType.Host)
+        {
+            TaskHelper.RunSafely(SaveManager.Instance.SaveRun(null, saveProgress: false));
+        }
+
         RefreshUiState();
     }
 
@@ -346,3 +358,4 @@ internal static partial class ForkedRoadManager
         RefreshUiState();
     }
 }
+

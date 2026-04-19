@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using MegaCrit.Sts2.Core.Context;
@@ -30,6 +30,9 @@ internal static partial class ForkedRoadManager
         {
             return;
         }
+
+        ActivateLocalSpectatorState(branch.BranchId);
+        RefreshUiState();
 
         Log.Info($"ForkedRoad local branch completion requested via {source}: batch={Runtime.ActiveBatch.BatchId} branch={branch.BranchId}");
         ForkedRoadBranchRoomCompletedMessage message = new()
@@ -64,15 +67,25 @@ internal static partial class ForkedRoadManager
 
         if (Runtime.Players.TryGetValue(localPlayerId, out PlayerBranchRuntime? player))
         {
-            player.Phase = RouteSplitPlayerPhase.SpectatingOtherBranch;
-            player.SpectatingBranchId = state.CurrentBranchId;
+            if (state.CurrentBranchId == player.CurrentBranchId)
+            {
+                player.Phase = RouteSplitPlayerPhase.FinishedWaiting;
+                player.SpectatingBranchId = null;
+            }
+            else
+            {
+                player.Phase = RouteSplitPlayerPhase.SpectatingOtherBranch;
+                player.SpectatingBranchId = state.CurrentBranchId;
+            }
         }
 
         ForkedRoadPlayerSpectateTargetChangedMessage message = new()
         {
             actIndex = Runtime.ActiveBatch.ActIndex,
             batchId = Runtime.ActiveBatch.BatchId,
-            branchId = state.CurrentBranchId
+            branchId = Runtime.Players.TryGetValue(localPlayerId, out PlayerBranchRuntime? localPlayer) && state.CurrentBranchId == localPlayer.CurrentBranchId
+                ? null
+                : state.CurrentBranchId
         };
         _netService.SendMessage(message);
         RefreshUiState();
@@ -101,15 +114,16 @@ internal static partial class ForkedRoadManager
             playerState.MapVoteDestinationCoord = null;
         }
 
+        if ((LocalContext.NetId ?? 0ul) == senderId)
+        {
+            ActivateLocalSpectatorState(branch.BranchId);
+        }
+
         if (branch.ReadyPlayerIds.Count >= GetRequiredReadyCount(branch))
         {
             branch.Phase = RouteSplitBranchPhase.Completed;
             branch.CompletionOrder = Runtime.ActiveBatch.BranchGroups.Count(static group => group.CompletionOrder.HasValue) + 1;
             UpdateSpectatorStatesForCompletedBranch(branch.BranchId);
-            if (branch.PlayerIds.Contains(LocalContext.NetId ?? 0ul))
-            {
-                ActivateLocalSpectatorState(branch.BranchId);
-            }
         }
 
         if (_netService?.Type == NetGameType.Host && Runtime.ActiveBatch.BranchGroups.All(static group => group.Phase == RouteSplitBranchPhase.Completed))
@@ -132,13 +146,24 @@ internal static partial class ForkedRoadManager
         foreach (KeyValuePair<ulong, SpectatorRuntimeState> pair in Runtime.Spectators.ToList())
         {
             SpectatorRuntimeState state = pair.Value;
-            int index = state.AvailableBranchIds.IndexOf(branchId);
-            if (index < 0)
+            bool isOwnCompletedBranch = Runtime.Players.TryGetValue(pair.Key, out PlayerBranchRuntime? completedPlayer) &&
+                                        completedPlayer.CurrentBranchId == branchId;
+            if (!isOwnCompletedBranch)
             {
-                continue;
-            }
+                for (int index = state.AvailableBranchIds.Count - 1; index >= 0; index--)
+                {
+                    if (state.AvailableBranchIds[index] != branchId)
+                    {
+                        continue;
+                    }
 
-            state.AvailableBranchIds.RemoveAt(index);
+                    state.AvailableBranchIds.RemoveAt(index);
+                    if (state.AvailablePlayerIds.Count > index)
+                    {
+                        state.AvailablePlayerIds.RemoveAt(index);
+                    }
+                }
+            }
             if (state.CurrentViewedBranchIndex >= state.AvailableBranchIds.Count)
             {
                 state.CurrentViewedBranchIndex = System.Math.Max(0, state.AvailableBranchIds.Count - 1);
@@ -146,7 +171,7 @@ internal static partial class ForkedRoadManager
 
             if (Runtime.Players.TryGetValue(pair.Key, out PlayerBranchRuntime? player))
             {
-                if (state.CurrentBranchId.HasValue)
+                if (state.CurrentBranchId.HasValue && state.CurrentBranchId != player.CurrentBranchId)
                 {
                     player.SpectatingBranchId = state.CurrentBranchId.Value;
                     player.Phase = RouteSplitPlayerPhase.SpectatingOtherBranch;
@@ -167,31 +192,44 @@ internal static partial class ForkedRoadManager
             return;
         }
 
-        List<int> availableBranches = Runtime.ActiveBatch.BranchGroups
-            .Where(group => group.Phase != RouteSplitBranchPhase.Completed && group.BranchId != completedBranchId)
-            .Select(group => group.BranchId)
-            .ToList();
+        (List<int> availableBranches, List<ulong?> availablePlayers) = BuildSpectatorTargets(completedBranchId, LocalContext.NetId.Value, includeOnlyUncompletedRemoteBranches: true);
+        Log.Info($"ForkedRoad activating spectator state for local player {LocalContext.NetId.Value}: completedBranch={completedBranchId} available=[{string.Join(",", availableBranches.Zip(availablePlayers, (branchId, playerId) => $"{branchId}:{playerId?.ToString() ?? "none"}"))}]");
 
-        if (availableBranches.Count == 0)
+        if (availableBranches.Count <= 1)
         {
             localPlayer.Phase = RouteSplitPlayerPhase.ReadyForNextBatch;
             localPlayer.SpectatingBranchId = null;
             Runtime.Spectators.Remove(LocalContext.NetId.Value);
+            Log.Info("ForkedRoad spectator state skipped because there are no alternate branches to view.");
             return;
         }
 
-        Runtime.Spectators[LocalContext.NetId.Value] = new SpectatorRuntimeState
+        int preferredIndex = availableBranches.FindIndex(branchId => branchId != completedBranchId);
+        if (preferredIndex < 0)
         {
-            AvailableBranchIds = availableBranches,
-            CurrentViewedBranchIndex = 0
-        };
-        localPlayer.Phase = RouteSplitPlayerPhase.SpectatingOtherBranch;
-        localPlayer.SpectatingBranchId = availableBranches[0];
+            preferredIndex = 0;
+        }
+
+        SpectatorRuntimeState state = new();
+        ApplySpectatorTargets(state, availableBranches, availablePlayers, preferredIndex);
+        Runtime.Spectators[LocalContext.NetId.Value] = state;
+        int viewedBranchId = availableBranches[preferredIndex];
+        if (viewedBranchId == completedBranchId)
+        {
+            localPlayer.Phase = RouteSplitPlayerPhase.FinishedWaiting;
+            localPlayer.SpectatingBranchId = null;
+        }
+        else
+        {
+            localPlayer.Phase = RouteSplitPlayerPhase.SpectatingOtherBranch;
+            localPlayer.SpectatingBranchId = viewedBranchId;
+        }
+        Log.Info($"ForkedRoad spectator state active: localPhase={localPlayer.Phase} viewedBranch={viewedBranchId} currentBranch={localPlayer.CurrentBranchId}");
     }
 
     private static void HandlePlayerSpectateTargetChangedMessage(ForkedRoadPlayerSpectateTargetChangedMessage message, ulong senderId)
     {
-        if (Runtime.ActiveBatch?.BatchId != message.batchId || !message.branchId.HasValue)
+        if (Runtime.ActiveBatch?.BatchId != message.batchId)
         {
             return;
         }
@@ -201,14 +239,41 @@ internal static partial class ForkedRoadManager
             return;
         }
 
-        int index = state.AvailableBranchIds.IndexOf(message.branchId.Value);
-        if (index >= 0)
+        if (!message.branchId.HasValue)
         {
-            state.CurrentViewedBranchIndex = index;
             if (Runtime.Players.TryGetValue(senderId, out PlayerBranchRuntime? player))
             {
-                player.SpectatingBranchId = message.branchId.Value;
-                player.Phase = RouteSplitPlayerPhase.SpectatingOtherBranch;
+                int selfIndex = -1;
+                for (int index = 0; index < state.AvailableBranchIds.Count; index++)
+                {
+                    ulong? playerId = state.AvailablePlayerIds.Count > index ? state.AvailablePlayerIds[index] : null;
+                    if (state.AvailableBranchIds[index] == (player.CurrentBranchId ?? -1) &&
+                        (!playerId.HasValue || playerId.Value == senderId))
+                    {
+                        selfIndex = index;
+                        break;
+                    }
+                }
+                if (selfIndex >= 0)
+                {
+                    state.CurrentViewedBranchIndex = selfIndex;
+                }
+
+                player.SpectatingBranchId = null;
+                player.Phase = RouteSplitPlayerPhase.FinishedWaiting;
+            }
+        }
+        else
+        {
+            int index = state.AvailableBranchIds.FindIndex(branchId => branchId == message.branchId.Value);
+            if (index >= 0)
+            {
+                state.CurrentViewedBranchIndex = index;
+                if (Runtime.Players.TryGetValue(senderId, out PlayerBranchRuntime? player))
+                {
+                    player.SpectatingBranchId = message.branchId.Value;
+                    player.Phase = RouteSplitPlayerPhase.SpectatingOtherBranch;
+                }
             }
         }
 
@@ -260,6 +325,17 @@ internal static partial class ForkedRoadManager
         SeedMapVoteLocationsIfNeeded();
         Runtime.Phase = RouteSplitRunPhase.SharedMapSelection;
         RestoreAllHookActivation();
+        if (_netService?.Type == NetGameType.Host)
+        {
+            if (HasDivergedPlayerLocations())
+            {
+                CaptureSaveRestoreSnapshotForCurrentRun();
+            }
+            else
+            {
+                DeleteSaveRestoreSnapshotFile();
+            }
+        }
         NormalizeRunLocationBuffer(_runState!.RunLocation);
         RefreshUiState();
         _ = TaskHelper.RunSafely(OpenMapAfterBatchResolvedAsync());
@@ -277,3 +353,4 @@ internal static partial class ForkedRoadManager
         }
     }
 }
+

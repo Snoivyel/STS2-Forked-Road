@@ -10,6 +10,7 @@ using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
@@ -54,6 +55,113 @@ internal static partial class ForkedRoadManager
     private static ForkedRoadSavedRunSnapshot? _loadedSavedRestoreSnapshot;
 
     private static ForkedRoadSavedRunSnapshot? _activeSavedRestoreSnapshot;
+
+    private static INetGameService? _earlySavedRestoreNetService;
+
+    private static bool _earlySavedRestoreHandlersRegistered;
+
+    private static bool _earlySavedRestoreAvailabilityKnown;
+
+    private static bool _earlyExpectedRemoteRestoreSnapshot;
+
+    private static ForkedRoadSavedRunSnapshot? _earlyReceivedRestoreSnapshot;
+
+    internal static void RegisterEarlySavedRestoreHandlers(INetGameService netService)
+    {
+        if (netService.Type != NetGameType.Client)
+        {
+            return;
+        }
+
+        if (_earlySavedRestoreHandlersRegistered && ReferenceEquals(_earlySavedRestoreNetService, netService))
+        {
+            return;
+        }
+
+        UnregisterEarlySavedRestoreHandlers();
+        ResetEarlySavedRestoreMessageBuffer();
+        netService.RegisterMessageHandler<ForkedRoadSaveRestoreAvailabilityMessage>(HandleEarlySaveRestoreAvailabilityMessage);
+        netService.RegisterMessageHandler<ForkedRoadSaveRestoreStateMessage>(HandleEarlySaveRestoreStateMessage);
+        _earlySavedRestoreNetService = netService;
+        _earlySavedRestoreHandlersRegistered = true;
+        Log.Debug("ForkedRoad registered early save-restore handlers for loaded-lobby join.");
+    }
+
+    internal static void UnregisterEarlySavedRestoreHandlers(INetGameService? netService = null)
+    {
+        INetGameService? service = netService ?? _earlySavedRestoreNetService;
+        if (!_earlySavedRestoreHandlersRegistered || service == null)
+        {
+            return;
+        }
+
+        service.UnregisterMessageHandler<ForkedRoadSaveRestoreAvailabilityMessage>(HandleEarlySaveRestoreAvailabilityMessage);
+        service.UnregisterMessageHandler<ForkedRoadSaveRestoreStateMessage>(HandleEarlySaveRestoreStateMessage);
+        if (ReferenceEquals(_earlySavedRestoreNetService, service))
+        {
+            _earlySavedRestoreNetService = null;
+        }
+        _earlySavedRestoreHandlersRegistered = false;
+    }
+
+    internal static void ResetEarlySavedRestoreMessageBuffer()
+    {
+        _earlySavedRestoreAvailabilityKnown = false;
+        _earlyExpectedRemoteRestoreSnapshot = false;
+        _earlyReceivedRestoreSnapshot = null;
+    }
+
+    private static void HandleEarlySaveRestoreAvailabilityMessage(ForkedRoadSaveRestoreAvailabilityMessage message, ulong senderId)
+    {
+        _earlySavedRestoreAvailabilityKnown = true;
+        _earlyExpectedRemoteRestoreSnapshot = message.hasRestoreState;
+        if (!message.hasRestoreState)
+        {
+            _earlyReceivedRestoreSnapshot = null;
+        }
+
+        Log.Info($"ForkedRoad buffered early save-restore availability from host {senderId}: hasRestoreState={message.hasRestoreState}");
+        ApplyBufferedEarlySaveRestoreMessagesIfNeeded();
+    }
+
+    private static void HandleEarlySaveRestoreStateMessage(ForkedRoadSaveRestoreStateMessage message, ulong senderId)
+    {
+        _earlySavedRestoreAvailabilityKnown = true;
+        _earlyExpectedRemoteRestoreSnapshot = true;
+        _earlyReceivedRestoreSnapshot = message.snapshot;
+        Log.Info($"ForkedRoad buffered early saved split restore snapshot from host {senderId} during loaded-lobby join.");
+        ApplyBufferedEarlySaveRestoreMessagesIfNeeded();
+    }
+
+    private static void ApplyBufferedEarlySaveRestoreMessagesIfNeeded()
+    {
+        if (!_isLoadingSavedMultiplayerRun || !_earlySavedRestoreAvailabilityKnown)
+        {
+            return;
+        }
+
+        NetGameType? loadNetType = _netService?.Type ?? _earlySavedRestoreNetService?.Type;
+        if (loadNetType != NetGameType.Client)
+        {
+            return;
+        }
+
+        _savedRestoreAvailabilityKnown = true;
+        _expectedRemoteRestoreSnapshot = _earlyExpectedRemoteRestoreSnapshot;
+        if (_earlyReceivedRestoreSnapshot.HasValue)
+        {
+            _hasReceivedRemoteRestoreSnapshot = true;
+            _activeSavedRestoreSnapshot = _earlyReceivedRestoreSnapshot;
+            _hasAppliedActiveSavedRestoreSnapshot = false;
+            TryApplyActiveSavedRestoreSnapshot();
+        }
+        else if (!_earlyExpectedRemoteRestoreSnapshot)
+        {
+            _activeSavedRestoreSnapshot = null;
+        }
+
+        TryFinalizeSavedRestoreReadiness();
+    }
 
     internal static void CaptureSaveRestoreSnapshotForCurrentRun()
     {
@@ -130,20 +238,28 @@ internal static partial class ForkedRoadManager
                 return;
             }
 
+            snapshot = NormalizeStaleActTransitionSnapshot(snapshot.Value);
+
             if (snapshot.Value.currentActIndex != save.CurrentActIndex)
             {
                 Log.Warn($"ForkedRoad ignored split restore snapshot at {path} because act index {snapshot.Value.currentActIndex} did not match save act index {save.CurrentActIndex}.");
                 return;
             }
 
-            HashSet<ulong> savePlayerIds = save.Players.Select(static player => player.NetId).ToHashSet();
-            if (snapshot.Value.players.Any(player => !savePlayerIds.Contains(player.playerId)))
+            if (!DoesSaveRestoreSnapshotMatchSaveLocation(snapshot.Value, save))
             {
-                Log.Warn($"ForkedRoad ignored split restore snapshot at {path} because snapshot players did not match the loaded save.");
+                Log.Warn($"ForkedRoad ignored split restore snapshot at {path} because its shared location did not match the save's current map coord.");
                 return;
             }
 
-            _loadedSavedRestoreSnapshot = snapshot.Value;
+            HashSet<ulong> savePlayerIds = save.Players.Select(static player => player.NetId).ToHashSet();
+            if (!TrySanitizeSaveRestoreSnapshot(snapshot.Value, savePlayerIds, out ForkedRoadSavedRunSnapshot sanitizedSnapshot))
+            {
+                Log.Warn($"ForkedRoad ignored split restore snapshot at {path} because it had no compatible player/branch state for the loaded save.");
+                return;
+            }
+
+            _loadedSavedRestoreSnapshot = sanitizedSnapshot;
             Log.Info($"ForkedRoad loaded split restore snapshot from {path}.");
         }
         catch (System.Exception ex)
@@ -152,7 +268,7 @@ internal static partial class ForkedRoadManager
         }
     }
 
-    internal static void PrepareForSavedMultiplayerLoad(SerializableRun run, NetGameType netGameType)
+    internal static void PrepareForSavedMultiplayerLoad(SerializableRun run, NetGameType netGameType, INetGameService netService)
     {
         _isLoadingSavedMultiplayerRun = true;
         _savedRestoreAvailabilityKnown = netGameType == NetGameType.Host;
@@ -167,6 +283,12 @@ internal static partial class ForkedRoadManager
         if (_activeSavedRestoreSnapshot.HasValue)
         {
             _expectedRemoteRestoreSnapshot = true;
+        }
+
+        if (netGameType == NetGameType.Client)
+        {
+            RegisterEarlySavedRestoreHandlers(netService);
+            ApplyBufferedEarlySaveRestoreMessagesIfNeeded();
         }
 
         TryFinalizeSavedRestoreReadiness();
@@ -208,6 +330,16 @@ internal static partial class ForkedRoadManager
             if (TryGetSavedRestoreLocalCoord(out MapCoord localCoord))
             {
                 Log.Info($"ForkedRoad restoring local player to saved branch coord {localCoord} instead of shared save coord {_runState?.CurrentMapCoord?.ToString() ?? "none"}.");
+                if (_runState != null)
+                {
+                    MapLocation mapLocation = new(localCoord, _runState.CurrentActIndex);
+                    NormalizeRunLocationBuffer(new RunLocation(mapLocation, null));
+                    if (RunManager.Instance?.RunLocationTargetedBuffer != null)
+                    {
+                        AddBufferedRunLocationVariants(RunLocationVisitedLocationsRef(RunManager.Instance.RunLocationTargetedBuffer), mapLocation);
+                    }
+                }
+
                 BranchGroupRuntime? localBranch = GetLocalBranch();
                 if (localBranch != null && TryGetResolvedRoomPlan(localBranch, out ResolvedBranchRoomPlan plan))
                 {
@@ -297,10 +429,12 @@ internal static partial class ForkedRoadManager
 
     private static async Task BroadcastSavedRestoreStateAsync()
     {
-        await Task.Delay(150);
-        await BroadcastSavedRestoreStateAttemptAsync();
-        await Task.Delay(350);
-        await BroadcastSavedRestoreStateAttemptAsync();
+        foreach (int delayMs in new[] { 150, 500, 1000, 2000 })
+        {
+            await Task.Delay(delayMs);
+            await BroadcastSavedRestoreStateAttemptAsync();
+        }
+
         _shouldBroadcastSavedRestoreState = false;
     }
 
@@ -535,6 +669,11 @@ internal static partial class ForkedRoadManager
             return false;
         }
 
+        if (HasStaleActiveBatchForCurrentAct())
+        {
+            ResetSplitRuntimeToSharedMap(_runState.CurrentMapCoord, $"stale_batch_before_snapshot:act{_runState.CurrentActIndex}");
+        }
+
         EnsureRuntimePlayers();
         return IsSplitBatchInProgress || HasDivergedPlayerLocations();
     }
@@ -542,10 +681,11 @@ internal static partial class ForkedRoadManager
     private static ForkedRoadSavedRunSnapshot CreateSaveRestoreSnapshot()
     {
         EnsureRuntimePlayers();
+        HashSet<ulong> currentRunPlayerIds = _runState!.Players.Select(static player => player.NetId).ToHashSet();
         ForkedRoadSavedRunSnapshot snapshot = new()
         {
             version = SaveRestoreSnapshotVersion,
-            currentActIndex = _runState!.CurrentActIndex,
+            currentActIndex = _runState.CurrentActIndex,
             hasSharedCurrentCoord = _runState.CurrentMapCoord.HasValue,
             sharedCurrentCoord = _runState.CurrentMapCoord ?? default,
             phase = Runtime.Phase,
@@ -556,6 +696,7 @@ internal static partial class ForkedRoadManager
             batchActIndex = Runtime.ActiveBatch?.ActIndex ?? _runState.CurrentActIndex,
             sourceCoords = Runtime.ActiveBatch?.SourceCoords.ToList() ?? new List<MapCoord>(),
             players = Runtime.Players.Values
+                .Where(player => currentRunPlayerIds.Contains(player.PlayerId))
                 .Select(static player => new ForkedRoadSavedPlayerSnapshot
                 {
                     playerId = player.PlayerId,
@@ -572,18 +713,27 @@ internal static partial class ForkedRoadManager
                 })
                 .ToList(),
             branches = Runtime.ActiveBatch?.BranchGroups
-                .Select(static branch =>
+                .Select(branch =>
                 {
                     ModelId? resolvedModel = branch.ResolvedModelId ?? branch.EncounterId;
+                    List<ulong> branchPlayerIds = branch.PlayerIds.Where(currentRunPlayerIds.Contains).ToList();
+                    List<ulong> branchEnteredIds = branch.EnteredPlayerIds.Where(currentRunPlayerIds.Contains).ToList();
+                    List<ulong> branchReadyIds = branch.ReadyPlayerIds.Where(currentRunPlayerIds.Contains).ToList();
+                    List<ulong> branchEliminatedIds = branch.EliminatedPlayerIds.Where(currentRunPlayerIds.Contains).ToList();
+                    if (branchPlayerIds.Count == 0)
+                    {
+                        return (ForkedRoadSavedBranchSnapshot?)null;
+                    }
+
                     return new ForkedRoadSavedBranchSnapshot
                     {
                         branchId = branch.BranchId,
                         targetCoord = branch.TargetCoord,
                         authorityPlayerId = branch.AuthorityPlayerId,
-                        playerIds = branch.PlayerIds.ToList(),
-                        enteredPlayerIds = branch.EnteredPlayerIds.ToList(),
-                        readyPlayerIds = branch.ReadyPlayerIds.ToList(),
-                        eliminatedPlayerIds = branch.EliminatedPlayerIds.ToList(),
+                        playerIds = branchPlayerIds,
+                        enteredPlayerIds = branchEnteredIds,
+                        readyPlayerIds = branchReadyIds,
+                        eliminatedPlayerIds = branchEliminatedIds,
                         hasRoomType = branch.RoomType.HasValue,
                         roomType = branch.RoomType ?? default,
                         hasPointType = branch.PointType.HasValue,
@@ -598,10 +748,110 @@ internal static partial class ForkedRoadManager
                         deathClearTriggered = branch.DeathClearTriggered
                     };
                 })
+                .Where(static branch => branch.HasValue)
+                .Select(static branch => branch!.Value)
                 .ToList() ?? new List<ForkedRoadSavedBranchSnapshot>()
         };
 
         return snapshot;
+    }
+
+    private static bool TrySanitizeSaveRestoreSnapshot(ForkedRoadSavedRunSnapshot snapshot, HashSet<ulong> savePlayerIds, out ForkedRoadSavedRunSnapshot sanitizedSnapshot)
+    {
+        List<ForkedRoadSavedPlayerSnapshot> players = snapshot.players
+            .Where(player => savePlayerIds.Contains(player.playerId))
+            .ToList();
+        if (players.Count == 0)
+        {
+            sanitizedSnapshot = default;
+            return false;
+        }
+
+        List<ForkedRoadSavedBranchSnapshot> branches = snapshot.branches
+            .Select(branch =>
+            {
+                List<ulong> playerIds = branch.playerIds.Where(savePlayerIds.Contains).ToList();
+                if (playerIds.Count == 0)
+                {
+                    return (ForkedRoadSavedBranchSnapshot?)null;
+                }
+
+                branch.playerIds = playerIds;
+                branch.enteredPlayerIds = branch.enteredPlayerIds.Where(savePlayerIds.Contains).ToList();
+                branch.readyPlayerIds = branch.readyPlayerIds.Where(savePlayerIds.Contains).ToList();
+                branch.eliminatedPlayerIds = branch.eliminatedPlayerIds.Where(savePlayerIds.Contains).ToList();
+                return branch;
+            })
+            .Where(static branch => branch.HasValue)
+            .Select(static branch => branch!.Value)
+            .ToList();
+
+        if (snapshot.hasActiveBatch && branches.Count == 0)
+        {
+            sanitizedSnapshot = default;
+            return false;
+        }
+
+        snapshot.players = players;
+        snapshot.branches = branches;
+        sanitizedSnapshot = snapshot;
+        return true;
+    }
+
+    private static ForkedRoadSavedRunSnapshot NormalizeStaleActTransitionSnapshot(ForkedRoadSavedRunSnapshot snapshot)
+    {
+        if (!snapshot.hasActiveBatch || snapshot.batchActIndex == snapshot.currentActIndex)
+        {
+            return snapshot;
+        }
+
+        Log.Warn($"ForkedRoad stripped stale split restore batch {snapshot.batchId} because batch act {snapshot.batchActIndex} did not match snapshot act {snapshot.currentActIndex}.");
+        snapshot.phase = RouteSplitRunPhase.SharedMapSelection;
+        snapshot.requiresAuthoritativeRoomPlans = false;
+        snapshot.hasActiveBatch = false;
+        snapshot.batchId = 0;
+        snapshot.batchActIndex = snapshot.currentActIndex;
+        snapshot.sourceCoords = new List<MapCoord>();
+        snapshot.branches = new List<ForkedRoadSavedBranchSnapshot>();
+
+        for (int i = 0; i < snapshot.players.Count; i++)
+        {
+            ForkedRoadSavedPlayerSnapshot player = snapshot.players[i];
+            player.hasCurrentBranchId = false;
+            player.currentBranchId = 0;
+            player.hasSpectatingBranchId = false;
+            player.spectatingBranchId = 0;
+            player.hasMapVoteDestinationCoord = false;
+            player.mapVoteDestinationCoord = default;
+            player.isEliminated = false;
+            player.phase = RouteSplitPlayerPhase.ChoosingRoute;
+            if (snapshot.hasSharedCurrentCoord)
+            {
+                player.hasSelectionCoord = true;
+                player.selectionCoord = snapshot.sharedCurrentCoord;
+            }
+
+            snapshot.players[i] = player;
+        }
+
+        return snapshot;
+    }
+
+    private static bool DoesSaveRestoreSnapshotMatchSaveLocation(ForkedRoadSavedRunSnapshot snapshot, SerializableRun save)
+    {
+        bool saveHasCurrentCoord = save.VisitedMapCoords.Count > 0;
+        if (snapshot.hasSharedCurrentCoord != saveHasCurrentCoord)
+        {
+            return false;
+        }
+
+        if (!saveHasCurrentCoord)
+        {
+            return true;
+        }
+
+        MapCoord saveCoord = save.VisitedMapCoords[save.VisitedMapCoords.Count - 1];
+        return snapshot.sharedCurrentCoord == saveCoord;
     }
 
     private static string GetSaveRestoreSnapshotPath()
@@ -612,3 +862,4 @@ internal static partial class ForkedRoadManager
         return ProjectSettings.GlobalizePath(godotPath);
     }
 }
+

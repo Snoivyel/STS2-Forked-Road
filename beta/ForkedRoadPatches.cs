@@ -1,28 +1,40 @@
-using Godot;
+﻿using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Logging;
+using MegaCrit.Sts2.Core.Models.Powers;
+using MegaCrit.Sts2.Core.Models.Singleton;
 using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
+using MegaCrit.Sts2.Core.Multiplayer.Game.PeerInput;
 using MegaCrit.Sts2.Core.Multiplayer.Game.Lobby;
+using MegaCrit.Sts2.Core.Multiplayer.Messages.Lobby;
 using MegaCrit.Sts2.Core.Multiplayer.Messages.Game;
 using MegaCrit.Sts2.Core.Multiplayer.Messages.Game.Sync;
 using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Events;
 using MegaCrit.Sts2.Core.Nodes.Multiplayer;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
+using MegaCrit.Sts2.Core.Nodes.Screens;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
+using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
+using MegaCrit.Sts2.Core.Saves.Runs;
+using MegaCrit.Sts2.Core.ValueProps;
 
 namespace ForkedRoad;
 
@@ -39,11 +51,8 @@ internal static class ForkedRoadPatches
     private static readonly AccessTools.FieldRef<NMultiplayerPlayerState, Control> MultiplayerPlayerStateCardContainerRef =
         AccessTools.FieldRefAccess<NMultiplayerPlayerState, Control>("_cardContainer");
 
-
-    private static readonly AccessTools.FieldRef<EventModel, CombatState> EventModelCombatStateRef =
-        AccessTools.FieldRefAccess<EventModel, CombatState>("_combatStateForCombatLayout");
-
-
+    private static readonly AccessTools.FieldRef<NPowerContainer, System.Collections.Generic.List<NPower>> PowerContainerPowerNodesRef =
+        AccessTools.FieldRefAccess<NPowerContainer, System.Collections.Generic.List<NPower>>("_powerNodes");
 
     private static readonly AccessTools.FieldRef<EventSynchronizer, System.Collections.Generic.List<EventModel>> EventSynchronizerEventsRef =
         AccessTools.FieldRefAccess<EventSynchronizer, System.Collections.Generic.List<EventModel>>("_events");
@@ -65,6 +74,23 @@ internal static class ForkedRoadPatches
 
     private static readonly AccessTools.FieldRef<NTreasureRoom, IRunState> TreasureRoomRunStateRef =
         AccessTools.FieldRefAccess<NTreasureRoom, IRunState>("_runState");
+
+    private static readonly AccessTools.FieldRef<NEventRoom, EventModel> EventRoomEventRef =
+        AccessTools.FieldRefAccess<NEventRoom, EventModel>("_event");
+
+    private static readonly AccessTools.FieldRef<NTreasureRoom, bool> TreasureRoomIsRelicCollectionOpenRef =
+        AccessTools.FieldRefAccess<NTreasureRoom, bool>("_isRelicCollectionOpen");
+
+    private static readonly System.Reflection.FieldInfo? TreasureRoomHasChestBeenOpenedField =
+        AccessTools.Field(typeof(NTreasureRoom), "_hasChestBeenOpened");
+
+    private static readonly System.Reflection.MethodInfo? PowerContainerUpdatePositionsMethod =
+        AccessTools.Method(typeof(NPowerContainer), "UpdatePositions");
+
+    private static bool HasTreasureRoomChestBeenOpened(NTreasureRoom room)
+    {
+        return TreasureRoomHasChestBeenOpenedField?.GetValue(room) is bool isOpen && isOpen;
+    }
 
 
     [HarmonyPatch(typeof(RunManager), nameof(RunManager.Launch))]
@@ -88,9 +114,22 @@ internal static class ForkedRoadPatches
     [HarmonyPatch(typeof(SaveManager), nameof(SaveManager.SaveRun))]
     private static class SaveManager_SaveRun_Patch
     {
-        private static void Prefix(AbstractRoom? preFinishedRoom)
+        private static void Prefix(AbstractRoom? preFinishedRoom, ref bool saveProgress)
         {
             ForkedRoadManager.CaptureSaveRestoreSnapshotForCurrentRun();
+            if (ForkedRoadManager.ShouldSuppressLegacyProgressSaveDuringAutosave())
+            {
+                saveProgress = false;
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(SaveManager), nameof(SaveManager.SaveProgressFile))]
+    private static class SaveManager_SaveProgressFile_Patch
+    {
+        private static bool Prefix()
+        {
+            return !ForkedRoadManager.ShouldSuppressLegacyProgressSaveDuringAutosave();
         }
     }
 
@@ -117,7 +156,34 @@ internal static class ForkedRoadPatches
     {
         private static void Prefix(LoadRunLobby lobby)
         {
-            ForkedRoadManager.PrepareForSavedMultiplayerLoad(lobby.Run, lobby.NetService.Type);
+            ForkedRoadManager.PrepareForSavedMultiplayerLoad(lobby.Run, lobby.NetService.Type, lobby.NetService);
+        }
+    }
+
+    [HarmonyPatch(typeof(LoadRunLobby), MethodType.Constructor, new[] { typeof(INetGameService), typeof(ILoadRunLobbyListener), typeof(SerializableRun) })]
+    private static class LoadRunLobby_Ctor_SaveRestore_Patch
+    {
+        private static void Postfix(LoadRunLobby __instance)
+        {
+            ForkedRoadManager.RegisterEarlySavedRestoreHandlers(__instance.NetService);
+        }
+    }
+
+    [HarmonyPatch(typeof(LoadRunLobby), MethodType.Constructor, new[] { typeof(INetGameService), typeof(ILoadRunLobbyListener), typeof(ClientLoadJoinResponseMessage) })]
+    private static class LoadRunLobby_ClientCtor_SaveRestore_Patch
+    {
+        private static void Postfix(LoadRunLobby __instance)
+        {
+            ForkedRoadManager.RegisterEarlySavedRestoreHandlers(__instance.NetService);
+        }
+    }
+
+    [HarmonyPatch(typeof(LoadRunLobby), nameof(LoadRunLobby.CleanUp))]
+    private static class LoadRunLobby_CleanUp_SaveRestore_Patch
+    {
+        private static void Postfix(LoadRunLobby __instance)
+        {
+            ForkedRoadManager.UnregisterEarlySavedRestoreHandlers(__instance.NetService);
         }
     }
 
@@ -136,6 +202,15 @@ internal static class ForkedRoadPatches
         private static bool Prefix(RunManager __instance, AbstractRoom? preFinishedRoom, ref System.Threading.Tasks.Task __result)
         {
             return !ForkedRoadManager.TryHandleSavedSplitLoad(__instance, preFinishedRoom, ref __result);
+        }
+    }
+
+    [HarmonyPatch(typeof(RunManager), nameof(RunManager.SetActInternal))]
+    private static class RunManager_SetActInternal_Patch
+    {
+        private static void Prefix(int actIndex)
+        {
+            ForkedRoadManager.HandleActTransition(actIndex);
         }
     }
 
@@ -160,16 +235,64 @@ internal static class ForkedRoadPatches
 
 
     [HarmonyPatch(typeof(EventRoom), nameof(EventRoom.EnterInternal))]
-    private static class EventRoom_EnterInternal_Patch
+    private static class EventRoom_Enter_Patch
     {
-        private static void Prefix()
+        private static void Prefix(ref IRunState? runState)
         {
             ForkedRoadManager.PrepareEventSynchronizerScopeForLocalBranch();
+            if (runState != null)
+            {
+                runState = ForkedRoadManager.ScopeRunStateToLocalBranch(runState);
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(NEventRoom), "_Ready")]
+    private static class NEventRoom_Ready_Patch
+    {
+        private static void Postfix(NEventRoom __instance)
+        {
+            if (!ForkedRoadManager.ShouldPublishLocalEventSpectatorState(__instance))
+            {
+                return;
+            }
+
+            EventModel eventModel = EventRoomEventRef(__instance);
+            ForkedRoadManager.PublishLocalEventSpectatorState(
+                ForkedRoadManager.GetSafeSpectatorRawText(eventModel.Title, eventModel.Id.Entry),
+                ForkedRoadManager.GetSafeSpectatorRawText(eventModel.Description, eventModel.Id.Entry),
+                ForkedRoadManager.GetDisplayedEventSpectatorOptions(eventModel));
+        }
+    }
+
+    [HarmonyPatch(typeof(NEventRoom), "RefreshEventState")]
+    private static class NEventRoom_RefreshEventState_Patch
+    {
+        private static void Postfix(NEventRoom __instance, EventModel eventModel)
+        {
+            if (!ForkedRoadManager.ShouldPublishLocalEventSpectatorState(__instance))
+            {
+                return;
+            }
+
+            ForkedRoadManager.PublishLocalEventSpectatorState(
+                ForkedRoadManager.GetSafeSpectatorRawText(eventModel.Title, eventModel.Id.Entry),
+                ForkedRoadManager.GetSafeSpectatorRawText(eventModel.Description, eventModel.Id.Entry),
+                ForkedRoadManager.GetDisplayedEventSpectatorOptions(eventModel));
+        }
+    }
+
+    [HarmonyPatch(typeof(NEventRoom), "OptionButtonClicked")]
+    private static class NEventRoom_OptionButtonClicked_Patch
+    {
+        private static bool Prefix()
+        {
+            return !ForkedRoadManager.IsReadOnlySpectatingRemoteBranch();
         }
     }
 
     [HarmonyPatch(typeof(MerchantRoom), nameof(MerchantRoom.EnterInternal))]
-    private static class MerchantRoom_EnterInternal_Patch
+    private static class MerchantRoom_Enter_Patch
     {
         private static void Prefix()
         {
@@ -178,7 +301,7 @@ internal static class ForkedRoadPatches
     }
 
     [HarmonyPatch(typeof(RestSiteRoom), nameof(RestSiteRoom.EnterInternal))]
-    private static class RestSiteRoom_EnterInternal_Patch
+    private static class RestSiteRoom_Enter_Patch
     {
         private static void Prefix()
         {
@@ -187,7 +310,7 @@ internal static class ForkedRoadPatches
     }
 
     [HarmonyPatch(typeof(TreasureRoom), nameof(TreasureRoom.EnterInternal))]
-    private static class TreasureRoom_EnterInternal_Patch
+    private static class TreasureRoom_Enter_Patch
     {
         private static void Prefix()
         {
@@ -195,8 +318,57 @@ internal static class ForkedRoadPatches
         }
     }
 
+    [HarmonyPatch(typeof(NTreasureRoom), "_Ready")]
+    private static class NTreasureRoom_Ready_Spectator_Patch
+    {
+        private static void Postfix()
+        {
+            ForkedRoadManager.PublishLocalTreasureSpectatorState(
+                "Treasure Room",
+                "Chest unopened.",
+                new[] { "Observe only" });
+        }
+    }
+
+    [HarmonyPatch(typeof(NTreasureRoom), "OnChestButtonReleased")]
+    private static class NTreasureRoom_OnChestButtonReleased_Spectator_Patch
+    {
+        private static bool Prefix()
+        {
+            if (ForkedRoadManager.IsReadOnlySpectatingRemoteBranch())
+            {
+                return false;
+            }
+
+            ForkedRoadManager.PublishLocalTreasureSpectatorState(
+                "Treasure Room",
+                "Opening chest...",
+                new[] { "Opening", "Observe only" });
+            return true;
+        }
+    }
+
+    [HarmonyPatch(typeof(NTreasureRoom), "OnActiveScreenChanged")]
+    private static class NTreasureRoom_OnActiveScreenChanged_Patch
+    {
+        private static void Postfix(NTreasureRoom __instance)
+        {
+            bool hasChestBeenOpened = HasTreasureRoomChestBeenOpened(__instance);
+            bool isRelicCollectionOpen = TreasureRoomIsRelicCollectionOpenRef(__instance);
+            string description = hasChestBeenOpened
+                ? (isRelicCollectionOpen ? "Relic selection open." : "Proceed available.")
+                : "Chest unopened.";
+            ForkedRoadManager.PublishLocalTreasureSpectatorState(
+                "Treasure Room",
+                description,
+                hasChestBeenOpened
+                    ? (isRelicCollectionOpen ? new[] { "Choosing relic", "Observe only" } : new[] { "Proceed", "Observe only" })
+                    : new[] { "Open chest", "Observe only" });
+        }
+    }
+
     [HarmonyPatch(typeof(CombatRoom), nameof(CombatRoom.EnterInternal))]
-    private static class CombatRoom_EnterInternal_Patch
+    private static class CombatRoom_Enter_Patch
     {
         private static void Prefix(CombatRoom __instance, IRunState? runState)
         {
@@ -205,12 +377,8 @@ internal static class ForkedRoadPatches
                 return;
             }
 
-            foreach (Player player in ForkedRoadManager.GetActivePlayers(runState))
+            foreach (Player player in ForkedRoadManager.GetCombatParticipantsForEntry(runState))
             {
-                if (player.Creature.IsDead)
-                {
-                    player.Creature.HealInternal(1m);
-                }
                 __instance.CombatState.AddPlayer(player);
             }
         }
@@ -222,6 +390,38 @@ internal static class ForkedRoadPatches
         private static void Postfix()
         {
             ForkedRoadManager.OnLocalCombatSetUp();
+        }
+    }
+
+    [HarmonyPatch(typeof(NPowerContainer), "Remove")]
+    private static class NPowerContainer_Remove_Patch
+    {
+        private static bool Prefix(NPowerContainer __instance, PowerModel power)
+        {
+            if (CombatManager.Instance.IsInProgress)
+            {
+                return true;
+            }
+
+            System.Collections.Generic.List<NPower> nodes = PowerContainerPowerNodesRef(__instance);
+            NPower? node = nodes.FirstOrDefault(n => n.Model == power);
+            if (node != null)
+            {
+                nodes.Remove(node);
+                PowerContainerUpdatePositionsMethod?.Invoke(__instance, Array.Empty<object>());
+                node.QueueFreeSafely();
+            }
+
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(NCombatRoom), "UpdateCreatureNavigation")]
+    private static class NCombatRoom_UpdateCreatureNavigation_Spectator_Patch
+    {
+        private static bool Prefix(NCombatRoom __instance)
+        {
+            return !ForkedRoadManager.TryHandleSpectatorCombatRoomNavigation(__instance);
         }
     }
 
@@ -282,6 +482,24 @@ internal static class ForkedRoadPatches
         private static bool Prefix(string context, GameAction? action, ref NetChecksumData __result)
         {
             return !ForkedRoadManager.TrySuppressChecksum(context, action, ref __result);
+        }
+    }
+
+    [HarmonyPatch(typeof(MultiplayerScalingModel), nameof(MultiplayerScalingModel.ModifyBlockMultiplicative))]
+    private static class MultiplayerScalingModel_ModifyBlockMultiplicative_Patch
+    {
+        private static bool Prefix(Creature target, decimal block, ValueProp props, CardModel? cardSource, CardPlay? cardPlay, ref decimal __result)
+        {
+            return !ForkedRoadManager.TryOverrideLegacyMultiplayerBlockScaling(target, props, ref __result);
+        }
+    }
+
+    [HarmonyPatch(typeof(MultiplayerScalingModel), nameof(MultiplayerScalingModel.ModifyPowerAmountGiven))]
+    private static class MultiplayerScalingModel_ModifyPowerAmountGiven_Patch
+    {
+        private static bool Prefix(PowerModel power, Creature giver, decimal amount, Creature? target, CardModel? cardSource, ref decimal __result)
+        {
+            return !ForkedRoadManager.TryOverrideLegacyMultiplayerPowerScaling(power, amount, target, ref __result);
         }
     }
 
@@ -435,6 +653,35 @@ internal static class ForkedRoadPatches
         }
     }
 
+    [HarmonyPatch(typeof(NMultiplayerPlayerState), "RefreshPlayerReadyIndicator", new[] { typeof(Player) })]
+    private static class NMultiplayerPlayerState_RefreshPlayerReadyIndicator_Player_Safe_Patch
+    {
+        private static bool Prefix(NMultiplayerPlayerState __instance)
+        {
+            return ShouldRunMultiplayerPlayerStateReadyIndicator(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(NMultiplayerPlayerState), "RefreshPlayerReadyIndicator", new[] { typeof(Player), typeof(bool) })]
+    private static class NMultiplayerPlayerState_RefreshPlayerReadyIndicator_PlayerBool_Safe_Patch
+    {
+        private static bool Prefix(NMultiplayerPlayerState __instance)
+        {
+            return ShouldRunMultiplayerPlayerStateReadyIndicator(__instance);
+        }
+    }
+
+    private static bool ShouldRunMultiplayerPlayerStateReadyIndicator(NMultiplayerPlayerState instance)
+    {
+        RunState? runState = RunManager.Instance.DebugOnlyGetState();
+        if (runState == null)
+        {
+            return true;
+        }
+
+        return runState.Players.Contains(instance.Player);
+    }
+
 
 
 
@@ -558,6 +805,33 @@ internal static class ForkedRoadPatches
         }
     }
 
+    [HarmonyPatch(typeof(ActionQueueSynchronizer), nameof(ActionQueueSynchronizer.RequestEnqueue))]
+    private static class ActionQueueSynchronizer_RequestEnqueue_Patch
+    {
+        private static bool Prefix()
+        {
+            return !ForkedRoadManager.IsReadOnlySpectatingRemoteBranch();
+        }
+    }
+
+    [HarmonyPatch(typeof(ActionQueueSynchronizer), nameof(ActionQueueSynchronizer.RequestEnqueueHookAction))]
+    private static class ActionQueueSynchronizer_RequestEnqueueHookAction_Patch
+    {
+        private static bool Prefix()
+        {
+            return !ForkedRoadManager.IsReadOnlySpectatingRemoteBranch();
+        }
+    }
+
+    [HarmonyPatch(typeof(ActionQueueSynchronizer), nameof(ActionQueueSynchronizer.RequestResumeActionAfterPlayerChoice))]
+    private static class ActionQueueSynchronizer_RequestResumeActionAfterPlayerChoice_Block_Patch
+    {
+        private static bool Prefix()
+        {
+            return !ForkedRoadManager.IsReadOnlySpectatingRemoteBranch();
+        }
+    }
+
     [HarmonyPatch(typeof(ActionQueueSynchronizer), "HandleRequestEnqueueActionMessage")]
     private static class ActionQueueSynchronizer_HandleRequestEnqueueActionMessage_Patch
     {
@@ -665,25 +939,34 @@ internal static class ForkedRoadPatches
     [HarmonyPatch(typeof(EventModel), nameof(EventModel.GenerateInternalCombatState))]
     private static class EventModel_GenerateInternalCombatState_Patch
     {
-        private static void Postfix(EventModel __instance)
+        private static void Prefix(ref IRunState runState)
+        {
+            runState = ForkedRoadManager.ScopeRunStateToLocalBranch(runState);
+        }
+    }
+
+    [HarmonyPatch(typeof(NCombatEventLayout), nameof(NCombatEventLayout.SetEvent))]
+    private static class NCombatEventLayout_SetEvent_Patch
+    {
+        private static bool Prefix(NCombatEventLayout __instance, EventModel eventModel)
         {
             if (!ForkedRoadManager.IsSplitBatchInProgress)
             {
-                return;
+                return true;
             }
 
-            CombatState? combatState = EventModelCombatStateRef(__instance);
-            if (combatState == null)
+            if (eventModel.Owner == null)
             {
-                return;
+                return true;
             }
 
-            IReadOnlyList<Player> activePlayers = ForkedRoadManager.GetActivePlayers(combatState.RunState);
-            HashSet<ulong> activeIds = activePlayers.Select(player => player.NetId).ToHashSet();
-            foreach (Player player in combatState.Players.Where(player => !activeIds.Contains(player.NetId)).ToList())
-            {
-                combatState.RemoveCreature(player.Creature, unattach: false);
-            }
+            IRunState runState = ForkedRoadManager.ScopeRunStateToLocalBranch(eventModel.Owner.RunState);
+            ICombatRoomVisuals visuals = eventModel.CreateCombatRoomVisuals(runState.Players, runState.Act);
+            NCombatRoom? nCombatRoom = NCombatRoom.Create(visuals, CombatRoomMode.VisualOnly);
+            __instance.SetCombatRoomNode(nCombatRoom);
+            nCombatRoom?.SetUpBackground(runState);
+            AccessTools.Method(typeof(NEventLayout), nameof(NEventLayout.SetEvent))?.Invoke(__instance, new object[] { eventModel });
+            return false;
         }
     }
 
@@ -700,8 +983,20 @@ internal static class ForkedRoadPatches
             }
 
             ForkedRoadManager.PrepareEventSynchronizerScopeForLocalBranch();
-            System.Collections.Generic.IReadOnlyList<Player> players = ForkedRoadManager.GetActivePlayers(RunManager.Instance.DebugOnlyGetState()!);
+            IRunState? currentRunState = RunManager.Instance?.DebugOnlyGetState();
+            if (currentRunState == null)
+            {
+                return true;
+            }
+
+            IRunState scopedRunState = ForkedRoadManager.ScopeRunStateToLocalBranch(currentRunState);
+            System.Collections.Generic.IReadOnlyList<Player> players = scopedRunState.Players;
+            Log.Debug($"ForkedRoad beginning scoped event {canonicalEvent.Id}: shared={canonicalEvent.IsShared} players=[{string.Join(",", players.Select(static player => player.NetId))}]");
             System.Collections.Generic.List<uint?> votes = EventSynchronizerPlayerVotesRef(__instance);
+            if (votes.Count > players.Count)
+            {
+                votes.RemoveRange(players.Count, votes.Count - players.Count);
+            }
             while (votes.Count < players.Count)
             {
                 votes.Add(null);
@@ -728,6 +1023,7 @@ internal static class ForkedRoadPatches
                 debugOnStart?.Invoke(eventModel);
                 events.Add(eventModel);
                 TaskHelper.RunSafely(eventModel.BeginEvent(player, isPrefinished));
+                Log.Debug($"ForkedRoad began scoped event instance for player {player.NetId}: event={eventModel.Id} options={eventModel.CurrentOptions.Count}");
             }
             return false;
         }
@@ -743,7 +1039,13 @@ internal static class ForkedRoadPatches
                 return true;
             }
 
-            if (!ForkedRoadManager.GetActivePlayers(RunManager.Instance.DebugOnlyGetState()!).Contains(player))
+            IRunState? currentRunState = RunManager.Instance?.DebugOnlyGetState();
+            if (currentRunState == null)
+            {
+                return true;
+            }
+
+            if (!ForkedRoadManager.ScopeRunStateToLocalBranch(currentRunState).Players.Contains(player))
             {
                 __result = null;
                 return false;
@@ -769,6 +1071,16 @@ internal static class ForkedRoadPatches
         {
             return !ForkedRoadManager.ShouldIgnoreEventMessage(message.location);
         }
+
+        private static void Postfix(EventSynchronizer __instance, VotedForSharedEventOptionMessage message)
+        {
+            if (ForkedRoadManager.ShouldIgnoreEventMessage(message.location))
+            {
+                return;
+            }
+
+            ForkedRoadManager.TryResolveSharedEventChoiceAsBranchAuthority(__instance);
+        }
     }
 
     [HarmonyPatch(typeof(EventSynchronizer), "HandleSharedEventOptionChosenMessage")]
@@ -777,6 +1089,26 @@ internal static class ForkedRoadPatches
         private static bool Prefix(SharedEventOptionChosenMessage message)
         {
             return !ForkedRoadManager.ShouldIgnoreEventMessage(message.location);
+        }
+    }
+
+    [HarmonyPatch(typeof(EventSynchronizer), nameof(EventSynchronizer.ChooseLocalOption))]
+    private static class EventSynchronizer_ChooseLocalOption_Patch
+    {
+        private static void Postfix(EventSynchronizer __instance)
+        {
+            ForkedRoadManager.TryResolveSharedEventChoiceAsBranchAuthority(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(ScreenStateTracker), "OnOverlayStackChanged")]
+    private static class ScreenStateTracker_OnOverlayStackChanged_Patch
+    {
+        private static bool Prefix()
+        {
+            // Latest game-beta already handles rewards-screen callback wiring internally.
+            // Let the original implementation run so this patch does not depend on stale private fields.
+            return true;
         }
     }
 
@@ -792,3 +1124,4 @@ internal static class ForkedRoadPatches
     }
 
 }
+
