@@ -4,7 +4,7 @@ Language: **English** | [中文](README_ZH.md)
 
 [GitHub Repository](https://github.com/Snoivyel/STS2-Forked-Road) | [MIT License](LICENSE)
 
-![Version](https://img.shields.io/badge/version-1.0.8-2ea043)
+![Version](https://img.shields.io/badge/version-1.0.9-2ea043)
 ![Game](https://img.shields.io/badge/Game-Slay%20the%20Spire%202-b54131)
 ![License](https://img.shields.io/badge/License-MIT-1f6feb)
 
@@ -56,7 +56,7 @@ The mod tracks which branch each player is currently in, scopes room and combat 
 
 ## Repository Notes
 
-- The packaged mod metadata currently reports version `1.0.8`.
-- Version `1.0.8` includes substantial refactors around branch runtime management, spectator views, and save/restore handling.
+- The packaged mod metadata currently reports version `1.0.9`.
+- Version `1.0.9` includes substantial refactors around branch runtime management, spectator views, and save/restore handling.
 - If you are building from source for the latest game branch, use `ForkedRoad.csproj`.
 - If you are working on the legacy old-game port, use `ForkedRoad.Legacy.csproj`.

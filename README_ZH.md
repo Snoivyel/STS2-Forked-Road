@@ -4,7 +4,7 @@
 
 [GitHub 仓库](https://github.com/Snoivyel/STS2-Forked-Road) | [MIT 协议](LICENSE)
 
-![Version](https://img.shields.io/badge/version-1.0.8-2ea043)
+![Version](https://img.shields.io/badge/version-1.0.9-2ea043)
 ![Game](https://img.shields.io/badge/Game-Slay%20the%20Spire%202-b54131)
 ![License](https://img.shields.io/badge/License-MIT-1f6feb)
 
@@ -56,7 +56,7 @@
 
 ## 仓库说明
 
-- 当前打包元数据里的版本号是 `1.0.8`。
-- `1.0.8` 版本包含了较大规模的重构，尤其集中在分支运行时、旁观视图和存档恢复相关部分。
+- 当前打包元数据里的版本号是 `1.0.9`。
+- `1.0.9` 版本包含了较大规模的重构，尤其集中在分支运行时、旁观视图和存档恢复相关部分。
 - 如果你要为当前最新游戏版本从源码构建，请使用 `ForkedRoad.csproj`。
 - 如果你要处理旧版游戏移植分支，请使用 `ForkedRoad.Legacy.csproj`。
