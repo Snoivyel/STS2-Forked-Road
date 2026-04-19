@@ -1,4 +1,4 @@
-Release Notes
+Release Notes for v1.0.8
 
 English
 

@@ -3,7 +3,7 @@
   "name": "Forked Road",
   "author": "Snoivyel",
   "description": "Allows multiplayer combat-route votes to resolve into separate combat branches, with room combat scaling based on the players who entered that branch.",
-  "version": "1.0.2",
+  "version": "1.0.8",
   "has_pck": false,
   "has_dll": true,
   "dependencies": [],
