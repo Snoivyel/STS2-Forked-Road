@@ -99,6 +99,46 @@ internal static partial class ForkedRoadManager
             branchOffset++;
         }
 
+        // Players revived from a death-clear batch reunite with a surviving teammate instead of
+        // immediately re-splitting onto their own route: merge branches that consist solely of
+        // revived followers into a branch that still has a non-revived member.
+        if (batch.BranchGroups.Count > 1)
+        {
+            List<BranchGroupRuntime> followOnlyBranches = batch.BranchGroups
+                .Where(branch => branch.PlayerIds.All(playerId =>
+                    Runtime.Players.TryGetValue(playerId, out PlayerBranchRuntime? runtimePlayer) &&
+                    runtimePlayer.ReviveFollowsTeammate))
+                .ToList();
+            BranchGroupRuntime? survivorBranch = batch.BranchGroups
+                .Where(branch => branch.PlayerIds.Any(playerId =>
+                    Runtime.Players.TryGetValue(playerId, out PlayerBranchRuntime? runtimePlayer) &&
+                    !runtimePlayer.ReviveFollowsTeammate))
+                .OrderBy(branch => branch.TargetCoord.row)
+                .ThenBy(branch => branch.TargetCoord.col)
+                .FirstOrDefault();
+            foreach (BranchGroupRuntime followBranch in followOnlyBranches)
+            {
+                // Prefer a branch that still has a survivor; if every branch is revive-only
+                // (the whole party died and was revived), reunite the revived players into one
+                // of the remaining branches.
+                BranchGroupRuntime? targetBranch = survivorBranch ?? followOnlyBranches
+                    .FirstOrDefault(candidate => candidate != followBranch && batch.BranchGroups.Contains(candidate));
+                if (targetBranch == null)
+                {
+                    continue;
+                }
+
+                targetBranch.PlayerIds.AddRange(followBranch.PlayerIds);
+                batch.BranchGroups.Remove(followBranch);
+                Log.Info($"ForkedRoad merged revived followers into branch {targetBranch.BranchId} at {targetBranch.TargetCoord} to reunite the party.");
+            }
+        }
+
+        foreach (PlayerBranchRuntime runtimePlayer in Runtime.Players.Values)
+        {
+            runtimePlayer.ReviveFollowsTeammate = false;
+        }
+
         IReadOnlyList<Player> eliminatedPlayers = _runState.Players.Where(player => IsPlayerEliminated(player.NetId)).ToList();
         foreach (Player eliminatedPlayer in eliminatedPlayers)
         {

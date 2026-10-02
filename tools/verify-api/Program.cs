@@ -315,6 +315,9 @@ class Program
         // ForkedRoadManager.cs
         CheckField("MegaCrit.Sts2.Core.Multiplayer.Game.MapSelectionSynchronizer", "_votes", "System.Collections.Generic.List`1[System.Nullable`1[MegaCrit.Sts2.Core.Multiplayer.Game.MapVote]]");
         CheckField("MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer", "_playerCollection", "MegaCrit.Sts2.Core.Runs.IPlayerCollection");
+        CheckField("MegaCrit.Sts2.Core.Multiplayer.Game.EventCombatSynchronizer", "_runState", "MegaCrit.Sts2.Core.Runs.IRunState");
+        CheckField("MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer", "_combatSynchronizer", "MegaCrit.Sts2.Core.Multiplayer.Game.EventCombatSynchronizer");
+        CheckMethod("MegaCrit.Sts2.Core.Combat.CombatManager", "EndCombatInternal", new[] { "MegaCrit.Sts2.Core.Combat.CombatTurnState" });
         CheckField("MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer", "_multiplayerOptionSelectionRng", "MegaCrit.Sts2.Core.Random.Rng");
         CheckField("MegaCrit.Sts2.Core.Multiplayer.Game.RestSiteSynchronizer", "_playerCollection", "MegaCrit.Sts2.Core.Runs.IPlayerCollection");
         CheckField("MegaCrit.Sts2.Core.Multiplayer.Game.TreasureRoomRelicSynchronizer", "_playerCollection", "MegaCrit.Sts2.Core.Runs.IPlayerCollection");

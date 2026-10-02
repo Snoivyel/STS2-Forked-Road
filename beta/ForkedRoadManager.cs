@@ -4129,6 +4129,14 @@ internal static partial class ForkedRoadManager
             return false;
         }
 
+        // Death clear is a split-branch mechanic: it lets the run continue when one branch
+        // gets wiped. In a shared room a full party wipe must fall through to the vanilla
+        // loss flow instead of being converted into a win with revives.
+        if (!IsSplitBatchInProgress || branch == null)
+        {
+            return false;
+        }
+
         if (HasDeathClearTriggered(branch))
         {
             return false;

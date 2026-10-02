@@ -31,6 +31,16 @@ internal static partial class ForkedRoadManager
             return;
         }
 
+        // Room-finished sources (rest-site proceed, merchant leave, ...) can fire while the
+        // shared room that preceded the split is still closing — before the local player has
+        // actually entered their branch room. Completing the branch at that point strands the
+        // run at the pre-split location. A branch may only complete from inside its own room.
+        if (!branch.EnteredPlayerIds.Contains(localPlayerId))
+        {
+            Log.Info($"ForkedRoad ignored branch completion via {source}: local player has not entered branch {branch.BranchId} yet.");
+            return;
+        }
+
         ActivateLocalSpectatorState(branch.BranchId);
         RefreshUiState();
 
@@ -311,6 +321,7 @@ internal static partial class ForkedRoadManager
                 }
 
                 player.IsEliminated = false;
+                player.ReviveFollowsTeammate = true;
             }
 
             player.CurrentBranchId = null;
@@ -322,11 +333,26 @@ internal static partial class ForkedRoadManager
         Runtime.Spectators.Clear();
         Runtime.ActiveBatch = null;
         ClearSeededSplitLocations();
+
+        // The batch is resolved: nobody is mid-branch anymore. Unify the tracked player
+        // locations with the host's current coordinate — the one the vanilla save is about to
+        // persist — so no stale branch-coord divergence survives into the save or into a
+        // quick-reload snapshot (which would otherwise restore a player into an already
+        // completed branch room).
+        var resolvedSharedCoord = _runState?.CurrentMapCoord;
+        foreach (PlayerBranchRuntime resolvedPlayer in Runtime.Players.Values)
+        {
+            resolvedPlayer.SelectionCoord = resolvedSharedCoord;
+        }
+
         SeedMapVoteLocationsIfNeeded();
         Runtime.Phase = RouteSplitRunPhase.SharedMapSelection;
         RestoreAllHookActivation();
         if (_netService?.Type == NetGameType.Host)
         {
+            // Align the vanilla save with the merged shared-map state, otherwise a quick
+            // reload can land everyone back in a stale mid-branch room.
+            TaskHelper.RunSafely(MegaCrit.Sts2.Core.Saves.SaveManager.Instance.SaveRun(null, saveProgress: false));
             if (HasDivergedPlayerLocations())
             {
                 CaptureSaveRestoreSnapshotForCurrentRun();

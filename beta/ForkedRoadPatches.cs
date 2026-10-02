@@ -1,4 +1,5 @@
-﻿using Godot;
+﻿using System.Reflection;
+using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
@@ -65,6 +66,12 @@ internal static class ForkedRoadPatches
 
     private static readonly AccessTools.FieldRef<EventSynchronizer, uint> EventSynchronizerPageIndexRef =
         AccessTools.FieldRefAccess<EventSynchronizer, uint>("_pageIndex");
+
+    private static readonly AccessTools.FieldRef<EventCombatSynchronizer, IRunState> EventCombatRunStateRef =
+        AccessTools.FieldRefAccess<EventCombatSynchronizer, IRunState>("_runState");
+
+    private static readonly AccessTools.FieldRef<EventSynchronizer, EventCombatSynchronizer> EventSynchronizerCombatSynchronizerRef =
+        AccessTools.FieldRefAccess<EventSynchronizer, EventCombatSynchronizer>("_combatSynchronizer");
 
     private static readonly AccessTools.FieldRef<NMerchantRoom, System.Collections.Generic.List<Player>> MerchantRoomPlayersRef =
         AccessTools.FieldRefAccess<NMerchantRoom, System.Collections.Generic.List<Player>>("_players");
@@ -425,9 +432,20 @@ internal static class ForkedRoadPatches
         }
     }
 
-    [HarmonyPatch(typeof(CombatManager), nameof(CombatManager.EndCombatInternal))]
+    [HarmonyPatch]
     private static class CombatManager_EndCombatInternal_Patch
     {
+        // v0.111.0 split EndCombatInternal into a parameterless overload (internal, test-only,
+        // no production callers) and the production overload taking CombatTurnState, which is an
+        // internal type and therefore cannot appear in the attribute's argument types.
+        private static MethodBase? TargetMethod()
+        {
+            Type? turnStateType = AccessTools.TypeByName("MegaCrit.Sts2.Core.Combat.CombatTurnState");
+            return turnStateType == null
+                ? null
+                : AccessTools.Method(typeof(CombatManager), "EndCombatInternal", new[] { turnStateType });
+        }
+
         private static void Prefix()
         {
             ForkedRoadManager.OnLocalCombatEnded();
@@ -918,12 +936,41 @@ internal static class ForkedRoadPatches
 
 
 
-    [HarmonyPatch(typeof(EventModel), nameof(EventModel.GenerateInternalCombatState))]
-    private static class EventModel_GenerateInternalCombatState_Patch
+    // v0.111.0 replaced EventModel.GenerateInternalCombatState(IRunState) with
+    // EventCombatSynchronizer.InitializeForEvent, which drives monster generation, combat-state
+    // creation, and player seeding from a private readonly _runState field. Scope that field to
+    // the local branch for the duration of the call, mirroring the previous ref-parameter patch.
+    [HarmonyPatch(typeof(EventCombatSynchronizer), nameof(EventCombatSynchronizer.InitializeForEvent))]
+    private static class EventCombatSynchronizer_InitializeForEvent_Patch
     {
-        private static void Prefix(ref IRunState runState)
+        private static IRunState? _originalRunState;
+        private static EventCombatSynchronizer? _scopedInstance;
+
+        private static void Prefix(EventCombatSynchronizer __instance)
         {
-            runState = ForkedRoadManager.ScopeRunStateToLocalBranch(runState);
+            _originalRunState = null;
+            _scopedInstance = null;
+
+            IRunState runState = EventCombatRunStateRef(__instance);
+            IRunState scoped = ForkedRoadManager.ScopeRunStateToLocalBranch(runState);
+            if (ReferenceEquals(scoped, runState))
+            {
+                return;
+            }
+
+            EventCombatRunStateRef(__instance) = scoped;
+            _originalRunState = runState;
+            _scopedInstance = __instance;
+        }
+
+        private static void Finalizer()
+        {
+            if (_scopedInstance != null && _originalRunState != null)
+            {
+                EventCombatRunStateRef(_scopedInstance) = _originalRunState;
+                _scopedInstance = null;
+                _originalRunState = null;
+            }
         }
     }
 
@@ -1004,7 +1051,7 @@ internal static class ForkedRoadPatches
                 EventModel eventModel = canonicalEvent.ToMutable();
                 debugOnStart?.Invoke(eventModel);
                 events.Add(eventModel);
-                TaskHelper.RunSafely(eventModel.BeginEvent(player, isPrefinished));
+                TaskHelper.RunSafely(eventModel.BeginEvent(player, EventSynchronizerCombatSynchronizerRef(__instance), isPrefinished));
                 Log.Debug($"ForkedRoad began scoped event instance for player {player.NetId}: event={eventModel.Id} options={eventModel.CurrentOptions.Count}");
             }
             return false;

@@ -71,6 +71,13 @@ internal sealed class PlayerBranchRuntime
     public MapCoord? MapVoteDestinationCoord { get; set; }
 
     public bool IsEliminated { get; set; }
+
+    /// <summary>
+    /// Set when a player is revived at batch completion after dying in their branch. On the
+    /// next split lock they are merged into a surviving teammate's branch instead of getting
+    /// their own route, so a revived player reunites with the rest of the party.
+    /// </summary>
+    public bool ReviveFollowsTeammate { get; set; }
 }
 
 internal sealed class SpectatorRuntimeState

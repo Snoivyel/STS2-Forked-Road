@@ -648,18 +648,55 @@ internal static partial class ForkedRoadManager
             return false;
         }
 
-        foreach (ForkedRoadSavedPlayerSnapshot playerSnapshot in _activeSavedRestoreSnapshot.Value.players)
+        ForkedRoadSavedRunSnapshot snapshot = _activeSavedRestoreSnapshot.Value;
+        ForkedRoadSavedPlayerSnapshot localPlayer = default;
+        bool foundLocalPlayer = false;
+        foreach (ForkedRoadSavedPlayerSnapshot playerSnapshot in snapshot.players)
         {
-            if (playerSnapshot.playerId != LocalContext.NetId.Value || !playerSnapshot.hasSelectionCoord)
+            if (playerSnapshot.playerId == LocalContext.NetId.Value)
             {
-                continue;
+                localPlayer = playerSnapshot;
+                foundLocalPlayer = true;
+                break;
             }
-
-            coord = playerSnapshot.selectionCoord;
-            return !_activeSavedRestoreSnapshot.Value.hasSharedCurrentCoord || coord != _activeSavedRestoreSnapshot.Value.sharedCurrentCoord;
         }
 
-        return false;
+        if (!foundLocalPlayer)
+        {
+            return false;
+        }
+
+        if (snapshot.hasActiveBatch)
+        {
+            // During a split the run state tracks the host's branch coord, so comparing the
+            // local selection coord against the shared save coord wrongly disqualified the
+            // host from the branch restore. An active batch always restores each player to
+            // their own branch room.
+            if (localPlayer.hasSelectionCoord)
+            {
+                coord = localPlayer.selectionCoord;
+                return true;
+            }
+
+            foreach (ForkedRoadSavedBranchSnapshot branchSnapshot in snapshot.branches)
+            {
+                if (branchSnapshot.playerIds.Contains(LocalContext.NetId.Value))
+                {
+                    coord = branchSnapshot.targetCoord;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        if (!localPlayer.hasSelectionCoord)
+        {
+            return false;
+        }
+
+        coord = localPlayer.selectionCoord;
+        return !snapshot.hasSharedCurrentCoord || coord != snapshot.sharedCurrentCoord;
     }
 
     private static bool ShouldPersistSaveRestoreSnapshot()

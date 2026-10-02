@@ -1354,6 +1354,18 @@ internal static partial class ForkedRoadManager
         return new HashSet<ulong>();
     }
 
+
+    private static BranchGroupRuntime? GetCurrentRoomBranch()
+    {
+        if (_runState?.CurrentMapCoord is not MapCoord currentCoord || Runtime.ActiveBatch == null)
+        {
+            return null;
+        }
+
+        return Runtime.ActiveBatch.BranchGroups
+            .FirstOrDefault(branch => branch.TargetCoord == currentCoord);
+    }
+
     private static BranchGroupRuntime? GetLocalBranch()
     {
         if (!LocalContext.NetId.HasValue)
@@ -2615,7 +2627,11 @@ internal static partial class ForkedRoadManager
             return;
         }
 
-        BranchGroupRuntime? branch = GetLocalBranch();
+        // Combat snapshots are produced on the host even when the current branch is
+        // assigned to an AI player. LocalContext always points at the host, so using
+        // GetLocalBranch() here labels an AI branch snapshot as the host branch and
+        // leaves the AI spectator target without combat content.
+        BranchGroupRuntime? branch = GetCurrentRoomBranch() ?? GetLocalBranch();
         if (branch == null || _runState.CurrentRoom is not CombatRoom combatRoom)
         {
             return;
